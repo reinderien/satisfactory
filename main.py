@@ -7,6 +7,7 @@ from sys import stderr
 from typing import Iterable, List, Dict, ClassVar, Pattern, Collection
 
 from requests import Session
+import swiglpk as lp
 
 
 def get_api(session: Session, **kwargs) -> Iterable[str]:
@@ -185,37 +186,7 @@ def fill_missing(session: Session, recipes: Collection[Recipe]) -> Iterable[Reci
         yield from Recipe.from_ore_page(missing_input)
 
 
-def linprog():
-    import swiglpk as pk
-
-    lp = pk.glp_create_prob()
-    pk.glp_set_prob_name(lp, 'satisfactory')
-
-    '''
-    n is the number of variables
-    m is the number of constraints
-    x is an n-vector, auxiliary variables
-    x[m+] is an n-vector, structural variables
-    z is the scalar cost/objective function
-    c is an n-vector, objective coefficients
-    a is an m*n constraint coefficient matrix
-    
-    
-    minimize
-    z=c[1]*x[m+1] + c[2]*x[m+2] +...+c[n]*x[m+n] + c[0]
-    
-    subject to linear constraints
-    x[1] = a[11]*x[m+1] + a[12]*x[m+2] + ... + a[1n]*x[m+n]
-    
-    and bounds of variables
-    l1 ≤ x1 ≤ u1
-    '''
-
-
-
-def main():
-    linprog()
-
+def get_recipes() -> List[Recipe]:
     with Session() as session:
         component_text, = get_api(session, titles='Template:ItemNav')
         component_names = parse_template(component_text, tier_before=3)
@@ -231,6 +202,146 @@ def main():
         ))
         recipes.extend(fill_missing(session, recipes))
 
+    return recipes
+
+
+def setup_linprog(recipes: Collection[Recipe], fixed_recipes: Dict[str, int]):
+    """
+    x[m+i] ("xs") is an n-vector, structural variables ("columns")
+    z is the scalar cost/objective function to minimize
+    c is an (n+1)-vector, objective coefficients; will be set to ones
+
+            n
+    z = [c c c...][xs]
+                  [xs]   n
+                  [xs]
+                  [...]
+
+    x ("xr") is an m-vector, auxiliary variables ("rows")
+    a is an m*n constraint coefficient matrix
+
+    auxiliary variables are set by
+        n        1        1
+      [a a a]   [xs]     [xr]
+    m [a a a] n [xs] = m [xr]
+      [a a a]   [xs]     [xr]
+
+    bounds apply to both structural and auxiliary variables:
+    l ≤ x ≤ u
+
+    A variable is called non-basic if it has an active bound; otherwise it is called basic.
+
+    For us:
+    - structural variables are all integers, count of each recipe instance
+    - auxiliary variables are individual resource rates
+    - no resource rate may be below zero or the solution will be unsustainable
+    - selected recipes will be fixed (set to 1)
+    """
+    resources = sorted({p for r in recipes for p in r.rates.keys()})
+    resource_indices: Dict[str, int] = {r: i for i, r in enumerate(resources, 1)}
+    m = len(resources)
+    n = len(recipes)
+
+    problem = lp.glp_create_prob()
+    lp.glp_set_prob_name(problem, 'satisfactory')
+    lp.glp_set_obj_name(problem, 'n_buildings')
+    lp.glp_set_obj_dir(problem, lp.GLP_MIN)
+    lp.glp_add_rows(problem, m)
+    lp.glp_add_cols(problem, n)
+
+    for i, resource in enumerate(resources, 1):
+        lp.glp_set_row_name(problem, i, resource)
+        lp.glp_set_row_bnds(
+            problem, i,
+            type=lp.GLP_LO,
+            lb=0, ub=float('inf'),
+        )
+
+    for j, recipe in enumerate(recipes, 1):
+        lp.glp_set_col_name(problem, j, recipe.name)
+        lp.glp_set_col_kind(problem, j, lp.GLP_IV)
+        lp.glp_set_obj_coef(problem, j, 1)
+
+        fixed = fixed_recipes.get(recipe.name)
+        if fixed is None:
+            lp.glp_set_col_bnds(
+                problem, j,
+                type=lp.GLP_LO,
+                lb=0, ub=float('inf'),
+            )
+        else:
+            lp.glp_set_col_bnds(
+                problem, j,
+                type=lp.GLP_FX,
+                lb=fixed, ub=fixed,
+            )
+
+        n_sparse = len(recipe.rates)
+        ind = lp.intArray(n_sparse + 1)
+        val = lp.doubleArray(n_sparse + 1)
+        for i, (resource, rate) in enumerate(recipe.rates.items(), 1):
+            ind[i] = resource_indices[resource]
+            val[i] = rate
+        lp.glp_set_mat_col(problem, j, n_sparse, ind, val)
+
+    lp.glp_create_index(problem)
+
+    return problem
+
+
+def check_lp(code: int):
+    if code == 0:
+        return
+
+    codes = {
+        getattr(lp, k): k
+        for k in dir(lp)
+        if k.startswith('GLP_E')
+    }
+    raise ValueError(f'gltk returned {codes[code]}')
+
+
+def solve_linprog(problem):
+    statuses = {
+        getattr(lp, k): k
+        for k in (
+            'GLP_OPT',
+            'GLP_FEAS',
+            'GLP_INFEAS',
+            'GLP_NOFEAS',
+            'GLP_UNBND',
+            'GLP_UNDEF',
+        )
+    }
+
+    print()
+    check_lp(lp.glp_simplex(problem, None))
+    print(statuses[lp.glp_get_status(problem)])
+
+    print()
+    check_lp(lp.glp_intopt(problem, None))
+    print(statuses[lp.glp_mip_status(problem)])
+    print()
+
+    print(f'Buildings: {lp.glp_mip_obj_val(problem)}\n')
+
+
+def main():
+    print('Fetching recipe data...')
+    recipes = get_recipes()
+
+    print('Setting up linear problem...')
+    problem = setup_linprog(
+        recipes,
+        {
+            'Modular Frame': 1,
+            'Rotor': 1,
+            'Smart Plating': 1,
+        },
+    )
+
+    print('Solving linear problem...')
+    solve_linprog(problem)
 
 
 main()
