@@ -321,13 +321,17 @@ def print_soln(problem, kind: str='sol'):
         copyfileobj(tempf, stdout)
 
 
-def solve_linprog(problem):
+def solve_linprog(problem) -> Dict[str, float]:
     print()
     check_lp(lp.glp_simplex(problem, None))
 
     print()
     check_lp(lp.glp_intopt(problem, None))
-    print_soln(problem, 'mip')
+
+    return {
+        lp.glp_get_col_name(problem, j): lp.glp_mip_col_val(problem, j)
+        for j in range(1, 1 + lp.glp_get_num_cols(problem))
+    }
 
 
 def main():
@@ -343,7 +347,8 @@ def main():
         },
     )
 
-    solve_linprog(problem)
+    percentages = solve_linprog(problem)
+    print_soln(problem, 'mip')
 
     """
     At this point, we have a total percentage for each recipe, but no choice on
@@ -354,5 +359,6 @@ def main():
     configuration, building allocation and power shard allocation that minimizes
     power consumption.
     """
+
 
 main()
