@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 
 import re
-import shutil
 from dataclasses import dataclass
 from itertools import count, chain
+from shutil import copyfileobj
 from sys import stderr, stdout
 from tempfile import NamedTemporaryFile
-from typing import Iterable, List, Dict, ClassVar, Pattern, Collection
+from typing import ClassVar, Collection, Dict, Iterable, List, Pattern
 
 from requests import Session
 import swiglpk as lp
@@ -308,7 +308,7 @@ def print_soln(problem, kind: str='sol'):
 
     with NamedTemporaryFile(mode='rt') as tempf:
         assert 0 == fun(problem, fname=tempf.name)
-        shutil.copyfileobj(tempf, stdout)
+        copyfileobj(tempf, stdout)
 
 
 def solve_linprog(problem):
