@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 
 import re
+import shutil
 from dataclasses import dataclass
 from itertools import count, chain
-from sys import stderr
+from sys import stderr, stdout
+from tempfile import NamedTemporaryFile
 from typing import Iterable, List, Dict, ClassVar, Pattern, Collection
 
 from requests import Session
@@ -76,7 +78,7 @@ class Recipe:
             )
 
     @classmethod
-    def from_page(cls, page: str) -> Iterable['Recipe']:
+    def from_component_page(cls, page: str) -> Iterable['Recipe']:
         '''
         {{CraftingTable
         | product = Cable
@@ -197,7 +199,7 @@ def get_recipes() -> List[Recipe]:
         )
 
         recipes = list(chain.from_iterable(
-            Recipe.from_page(page)
+            Recipe.from_component_page(page)
             for page in component_pages
         ))
         recipes.extend(fill_missing(session, recipes))
@@ -301,36 +303,27 @@ def check_lp(code: int):
     raise ValueError(f'gltk returned {codes[code]}')
 
 
-def solve_linprog(problem):
-    statuses = {
-        getattr(lp, k): k
-        for k in (
-            'GLP_OPT',
-            'GLP_FEAS',
-            'GLP_INFEAS',
-            'GLP_NOFEAS',
-            'GLP_UNBND',
-            'GLP_UNDEF',
-        )
-    }
+def print_soln(problem, kind: str='sol'):
+    fun = getattr(lp, f'glp_print_{kind}')
 
+    with NamedTemporaryFile(mode='rt') as tempf:
+        assert 0 == fun(problem, fname=tempf.name)
+        shutil.copyfileobj(tempf, stdout)
+
+
+def solve_linprog(problem):
     print()
     check_lp(lp.glp_simplex(problem, None))
-    print(statuses[lp.glp_get_status(problem)])
 
     print()
     check_lp(lp.glp_intopt(problem, None))
-    print(statuses[lp.glp_mip_status(problem)])
-    print()
-
-    print(f'Buildings: {lp.glp_mip_obj_val(problem)}\n')
+    print_soln(problem, 'mip')
 
 
 def main():
     print('Fetching recipe data...')
     recipes = get_recipes()
 
-    print('Setting up linear problem...')
     problem = setup_linprog(
         recipes,
         {
@@ -340,7 +333,6 @@ def main():
         },
     )
 
-    print('Solving linear problem...')
     solve_linprog(problem)
 
 
