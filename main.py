@@ -207,7 +207,7 @@ def get_recipes() -> List[Recipe]:
     return recipes
 
 
-def setup_linprog(recipes: Collection[Recipe], fixed_recipes: Dict[str, int]):
+def setup_linprog(recipes: Collection[Recipe], fixed_recipe_percentages: Dict[str, int]):
     """
     x[m+i] ("xs") is an n-vector, structural variables ("columns")
     z is the scalar cost/objective function to minimize
@@ -234,10 +234,10 @@ def setup_linprog(recipes: Collection[Recipe], fixed_recipes: Dict[str, int]):
     A variable is called non-basic if it has an active bound; otherwise it is called basic.
 
     For us:
-    - structural variables are all integers, count of each recipe instance
-    - auxiliary variables are individual resource rates
+    - structural variables are all integers, one percent of each recipe instance
+    - auxiliary variables are individual resource rates (also scaled by 0.01)
     - no resource rate may be below zero or the solution will be unsustainable
-    - selected recipes will be fixed (set to 1)
+    - selected recipes will be fixed to a desired output percentage
     """
     resources = sorted({p for r in recipes for p in r.rates.keys()})
     resource_indices: Dict[str, int] = {r: i for i, r in enumerate(resources, 1)}
@@ -246,13 +246,15 @@ def setup_linprog(recipes: Collection[Recipe], fixed_recipes: Dict[str, int]):
 
     problem = lp.glp_create_prob()
     lp.glp_set_prob_name(problem, 'satisfactory')
-    lp.glp_set_obj_name(problem, 'n_buildings')
+    lp.glp_set_obj_name(problem, 'percentage_sum')
     lp.glp_set_obj_dir(problem, lp.GLP_MIN)
     lp.glp_add_rows(problem, m)
     lp.glp_add_cols(problem, n)
 
     for i, resource in enumerate(resources, 1):
         lp.glp_set_row_name(problem, i, resource)
+
+        # Every resource rate must be 0 or greater for sustainability
         lp.glp_set_row_bnds(
             problem, i,
             type=lp.GLP_LO,
@@ -261,23 +263,31 @@ def setup_linprog(recipes: Collection[Recipe], fixed_recipes: Dict[str, int]):
 
     for j, recipe in enumerate(recipes, 1):
         lp.glp_set_col_name(problem, j, recipe.name)
+
+        # The game's clock scaling resolution is one percentage point, so we
+        # ask for integers with an implicit scale of 100
         lp.glp_set_col_kind(problem, j, lp.GLP_IV)
+
+        # All recipes are currently weighed the same
         lp.glp_set_obj_coef(problem, j, 1)
 
-        fixed = fixed_recipes.get(recipe.name)
+        fixed = fixed_recipe_percentages.get(recipe.name)
         if fixed is None:
+            # All recipes must have at least 0 instances
             lp.glp_set_col_bnds(
                 problem, j,
                 type=lp.GLP_LO,
                 lb=0, ub=float('inf'),
             )
         else:
+            # Set our desired (fixed) outputs
             lp.glp_set_col_bnds(
                 problem, j,
                 type=lp.GLP_FX,
                 lb=fixed, ub=fixed,
             )
 
+        # The constraint coefficients are just the recipe rates
         n_sparse = len(recipe.rates)
         ind = lp.intArray(n_sparse + 1)
         val = lp.doubleArray(n_sparse + 1)
@@ -327,13 +337,22 @@ def main():
     problem = setup_linprog(
         recipes,
         {
-            'Modular Frame': 1,
-            'Rotor': 1,
-            'Smart Plating': 1,
+            'Modular Frame': 100,
+            'Rotor': 100,
+            'Smart Plating': 100,
         },
     )
 
     solve_linprog(problem)
 
+    """
+    At this point, we have a total percentage for each recipe, but no choice on
+    allocation of those percentages to a building count, considering nonlinear
+    power load and the addition of power shards.
+    
+    For each maximum building count, there will be an optimal clock scaling
+    configuration, building allocation and power shard allocation that minimizes
+    power consumption.
+    """
 
 main()
