@@ -3,13 +3,26 @@ Oh no, not this again
 
 [Yes](https://github.com/reinderien/factorio),
 [this](https://github.com/reinderien/terraria-npcs)
-[again](https://github.com/reinderien/blockhood). Me doing dumb things with 
-video games.
+[again](https://github.com/reinderien/blockhood). 
+Me doing dumb things with video games.
 
 This time it's [Satisfactory](https://www.satisfactorygame.com). It's a very 
 promising game in early-ish beta that is basically a modern version of
 [Infinifactory](https://store.steampowered.com/app/300570/Infinifactory)
 with, so far, somewhat less plot and significantly better graphics.
+
+As with most other factory games, you make factories that crank out components
+of ever-increasing complexity, requiring ever-increasing raw resources. The 
+recipes governing these supply chains are documented in the wiki. The factory 
+will grow in complexity and power needs as more of the tech tree is unlocked; in 
+Satisfactory terminology this is divided into _tiers_.
+
+One aspect of Satisfactory that is so far quite unique is the concept of 
+clocking. Not only can factory buildings be speed-boosted ("overclocked") with 
+special items, the building can be set to a _specific_ clock anywhere from 1% to
+its maximum rate in increments of 1%. This is novel, interesting, allows for
+much finer-grained efficiency tuning, and is a complete
+[nerd snipe](https://xkcd.com/356).
 
 Database
 --------
@@ -229,8 +242,8 @@ for some features; but the free level worked quite well for me and doesn't even
 come with nags.
 
 Gekko has a sympy-like symbolic expression language that can directly translate
-Python expressions to constraints and objectives, so it's definitely not as low-
-level as GLPK. Our problem setup becomes:
+Python expressions to constraints and objectives, so it's definitely not as 
+low-level as GLPK. Our problem setup becomes:
 
 - We need to select the `APOPT` solver and tell it that we're using integer
   variables
