@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
+import logging
 import os
 import pickle
 import re
 from dataclasses import dataclass
 from itertools import count, chain
 from pathlib import Path
-from shutil import copyfileobj
-from sys import stderr, stdout
 from tempfile import NamedTemporaryFile
 from typing import ClassVar, Collection, Dict, Iterable, List, Pattern, Tuple
 
 from gekko import GEKKO
 from requests import Session
 import swiglpk as lp
+
+
+logger = logging.getLogger('satisfactory')
 
 
 def get_api(session: Session, **kwargs) -> Iterable[str]:
@@ -26,7 +28,9 @@ def get_api(session: Session, **kwargs) -> Iterable[str]:
     }
 
     while True:
-        with session.get('https://satisfactory.gamepedia.com/api.php', params=params) as resp:
+        with session.get(
+            'https://satisfactory.gamepedia.com/api.php', params=params,
+        ) as resp:
             resp.raise_for_status()
             data = resp.json()
 
@@ -34,7 +38,7 @@ def get_api(session: Session, **kwargs) -> Iterable[str]:
         if warnings:
             for title, entries in warnings.items():
                 for warning in entries.values():
-                    print(f'{title}: {warning}', file=stderr)
+                    logger.warning(f'%s: %s', title, warning)
 
         for page in data['query']['pages'].values():
             revision, = page['revisions']
@@ -66,7 +70,9 @@ class Recipe:
 
     rates: Dict[str, float]
 
-    parse_re: ClassVar[Pattern] = re.compile(r'{{CraftingTable(.+?)}}', re.I | re.S)
+    parse_re: ClassVar[Pattern] = re.compile(
+        r'{{CraftingTable(.+?)}}', re.I | re.S,
+    )
 
     BASE_POWERS: ClassVar[Dict[str, float]] = {
         'Smelter': 4e6,
@@ -95,7 +101,7 @@ class Recipe:
 
     @classmethod
     def from_component_page(cls, page: str) -> Iterable['Recipe']:
-        '''
+        """
         {{CraftingTable
         | product = Cable
         | recipeName = Cable
@@ -108,7 +114,7 @@ class Recipe:
         | quantity1 = 2           (input per crafting time)
         | ingredient1 = Wire
         }}
-        '''
+        """
 
         for attrs in cls.get_attrs(page):
             if attrs.get('alternateRecipe') == '1':
@@ -153,7 +159,7 @@ class Recipe:
         
         but in all ore cases this translates to
         
-        	    Miner Mk.1	Miner Mk.2	Miner Mk.3
+                Miner Mk.1  Miner Mk.2  Miner Mk.3
         Impure	30	60	120
         Normal	60	120	240
         Pure	120	240	480
@@ -187,7 +193,9 @@ class Recipe:
             )
 
 
-def fill_missing(session: Session, recipes: Collection[Recipe]) -> Iterable[Recipe]:
+def fill_missing(
+    session: Session, recipes: Collection[Recipe]
+) -> Iterable[Recipe]:
     known_products = set()
     all_inputs = set()
     for recipe in recipes:
@@ -204,10 +212,10 @@ def fill_missing(session: Session, recipes: Collection[Recipe]) -> Iterable[Reci
         yield from Recipe.from_ore_page(missing_input)
 
 
-def get_recipes() -> List[Recipe]:
+def get_recipes(tier_before: int) -> List[Recipe]:
     with Session() as session:
         component_text, = get_api(session, titles='Template:ItemNav')
-        component_names = parse_template(component_text, tier_before=3)
+        component_names = parse_template(component_text, tier_before)
         component_pages = get_api(
             session,
             titles='|'.join(component_names),
@@ -223,20 +231,23 @@ def get_recipes() -> List[Recipe]:
     return recipes
 
 
-def load_recipes() -> List[Recipe]:
+def load_recipes(tier_before: int) -> List[Recipe]:
     fn = Path('.recipes')
     if fn.exists():
         with fn.open('rb') as f:
             return pickle.load(f)
 
-    print('Fetching recipe data...')
-    recipes = get_recipes()
+    logger.info('Fetching recipe data from MediaWiki...')
+    recipes = get_recipes(tier_before)
     with fn.open('wb') as f:
         pickle.dump(recipes, f)
     return recipes
 
 
-def setup_linprog(recipes: Collection[Recipe], fixed_recipe_percentages: Dict[str, int]):
+def setup_linprog(
+    recipes: Collection[Recipe],
+    fixed_recipe_percentages: Dict[str, int],
+):
     """
     x[m+i] ("xs") is an n-vector, structural variables ("columns")
     z is the scalar cost/objective function to minimize
@@ -260,7 +271,8 @@ def setup_linprog(recipes: Collection[Recipe], fixed_recipe_percentages: Dict[st
     bounds apply to both structural and auxiliary variables:
     l ≤ x ≤ u
 
-    A variable is called non-basic if it has an active bound; otherwise it is called basic.
+    A variable is called non-basic if it has an active bound; otherwise it is
+    called basic.
 
     For us:
     - structural variables are all integers, one percent of each recipe instance
@@ -269,7 +281,10 @@ def setup_linprog(recipes: Collection[Recipe], fixed_recipe_percentages: Dict[st
     - selected recipes will be fixed to a desired output percentage
     """
     resources = sorted({p for r in recipes for p in r.rates.keys()})
-    resource_indices: Dict[str, int] = {r: i for i, r in enumerate(resources, 1)}
+    resource_indices: Dict[str, int] = {
+        r: i
+        for i, r in enumerate(resources, 1)
+    }
     m = len(resources)
     n = len(recipes)
 
@@ -342,7 +357,10 @@ def check_lp(code: int):
     raise ValueError(f'gltk returned {codes[code]}')
 
 
-def print_soln(problem, kind: str='sol'):
+def log_soln(problem, kind: str):
+    if logger.level > logging.DEBUG:
+        return
+
     fun = getattr(lp, f'glp_print_{kind}')
 
     tempf = NamedTemporaryFile(mode='w', delete=False)
@@ -350,22 +368,44 @@ def print_soln(problem, kind: str='sol'):
         tempf.close()
         assert 0 == fun(problem, tempf.name)
         with open(tempf.name, 'rt') as f:
-            copyfileobj(f, stdout)
+            logger.debug(f.read())
     finally:
         os.unlink(tempf.name)
 
 
-def solve_linprog(problem) -> Dict[str, float]:
-    print()
-    check_lp(lp.glp_simplex(problem, None))
+def level_for_parm() -> int:
+    # It's difficult (impossible?) to redirect stdout from this DLL, so just
+    # modify its verbosity to follow that of our own logger
 
-    print()
-    check_lp(lp.glp_intopt(problem, None))
+    if logger.level <= logging.DEBUG:
+        return lp.GLP_MSG_ALL
+    if logger.level <= logging.INFO:
+        return lp.GLP_MSG_ERR  # Skip over ON; too verbose
+    if logger.level <= logging.ERROR:
+        return lp.GLP_MSG_ERR
+    return lp.GLP_MSG_OFF
 
-    return {
-        lp.glp_get_col_name(problem, j): lp.glp_mip_col_val(problem, j)
-        for j in range(1, 1 + lp.glp_get_num_cols(problem))
-    }
+
+def solve_linprog(problem) -> Iterable[Tuple[str, float]]:
+    level = level_for_parm()
+
+    parm = lp.glp_smcp()
+    lp.glp_init_smcp(parm)
+    parm.msg_lev = level
+    check_lp(lp.glp_simplex(problem, parm))
+    log_soln(problem, 'sol')
+
+    parm = lp.glp_iocp()
+    lp.glp_init_iocp(parm)
+    parm.msg_lev = level
+    check_lp(lp.glp_intopt(problem, parm))
+    log_soln(problem, 'mip')
+
+    for j in range(1, 1 + lp.glp_get_num_cols(problem)):
+        clock = lp.glp_mip_col_val(problem, j)
+        if clock:
+            name = lp.glp_get_col_name(problem, j)
+            yield name, clock
 
 
 @dataclass
@@ -397,20 +437,19 @@ class SolvedRecipe:
         max_buildings: int,
     ) -> List['SolvedRecipe']:
         """
-        At this point, we have a total percentage for each recipe, but no choice on
-        allocation of those percentages to a building count, considering nonlinear
-        power load and the addition of power shards.
+        At this point, we have a total percentage for each recipe, but no choice
+        on allocation of those percentages to a building count, considering
+        nonlinear power load and the addition of power shards.
 
-        For a given maximum building count, there will be an optimal clock scaling
-        configuration, building allocation and power shard allocation that minimizes
-        power consumption.
+        For a given maximum building count, there will be an optimal clock
+        scaling configuration, building allocation and power shard allocation
+        that minimizes power consumption.
         """
 
         recipes_by_name = {r.name: r for r in recipes}
         rate_items: Collection[Tuple[Recipe, float]] = [
             (recipes_by_name[recipe], rate)
             for recipe, rate in percentages.items()
-            if rate
         ]
 
         # No network; discontinuous problem; respect integer constraints
@@ -432,7 +471,7 @@ class SolvedRecipe:
 
         m.Equation(sum(buildings) <= max_buildings)
         m.Minimize(power)
-        m.solve(disp=True)
+        m.solve(disp=logger.level <= logging.DEBUG)
 
         return [
             cls(
@@ -445,7 +484,13 @@ class SolvedRecipe:
 
 
 def main():
-    recipes = load_recipes()
+    logger.level = logging.INFO
+    logger.addHandler(logging.StreamHandler())
+
+    recipes = load_recipes(tier_before=3)
+    logger.info(f'{len(recipes)} recipes loaded.')
+
+    logger.info('Linear stage...')
     problem = setup_linprog(
         recipes,
         {
@@ -454,10 +499,10 @@ def main():
             'Smart Plating': 100,
         },
     )
+    percentages = dict(solve_linprog(problem))
+    logger.info(f'{len(percentages)} recipes in system.')
 
-    percentages = solve_linprog(problem)
-    print_soln(problem, 'mip')
-
+    logger.info('Nonlinear stage...')
     solved = SolvedRecipe.solve_all(recipes, percentages, 50)
 
 
