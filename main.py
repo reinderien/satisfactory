@@ -482,15 +482,35 @@ class SolvedRecipe:
     def __str__(self):
         return f'{self.recipe} ×{self.n}'
 
+    def distribute(self) -> Tuple['SolvedRecipe', ...]:
+        quo, rem = divmod(self.clock_total, self.n)
+        if not rem:
+            return self,
+
+        y = self.clock_total - quo*self.n
+        x = self.n - y
+
+        return (
+            SolvedRecipe(self.recipe, x, x*quo),
+            SolvedRecipe(self.recipe, y, y*(quo+1)),
+        )
+
+
+@dataclass
+class Solution:
+    recipes: List[SolvedRecipe]
+    rates: Dict[str, float]
+
     @classmethod
-    def solve_all(
+    def solve(
         cls,
         recipes: Dict[str, Recipe],
         percentages: Dict[str, float],
+        rates: Dict[str, float],
         minimize: PowerObjective,
         max_buildings: Optional[int] = None,
         max_power: Optional[float] = None,
-    ) -> List['SolvedRecipe']:
+    ) -> 'Solution':
         """
         At this point, we have a total percentage for each recipe, but no choice
         on allocation of those percentages to a building count, considering
@@ -552,74 +572,59 @@ class SolvedRecipe:
         m.solve(disp=logger.level <= logging.DEBUG)
 
         solved = (
-            cls(
+            SolvedRecipe(
                 recipe=recipe,
                 n=int(building.value[0]),
                 clock_total=int(clock),
             ).distribute()
             for building, (recipe, clock) in zip(buildings, rate_items)
         )
-        return list(chain.from_iterable(solved))
-
-    def distribute(self) -> Tuple['SolvedRecipe', ...]:
-        quo, rem = divmod(self.clock_total, self.n)
-        if not rem:
-            return self,
-
-        y = self.clock_total - quo*self.n
-        x = self.n - y
-
-        return (
-            SolvedRecipe(self.recipe, x, x*quo),
-            SolvedRecipe(self.recipe, y, y*(quo+1)),
+        return cls(
+            recipes=list(chain.from_iterable(solved)),
+            rates=rates,
         )
 
+    @property
+    def total_buildings(self) -> int:
+        return sum(s.n for s in self.recipes)
 
-def print_power(solved: Collection[SolvedRecipe], rates: Dict[str, float]):
-    print(
-        f'{"Recipe":40} '
-        f'{"Clock":5} '
-        f'{"n":>2} '
-        
-        f'{"P (MW)":>6} '
-        f'{"tot":>6} '
-        
-        f'{"shards":>6} '
-        f'{"tot":>3} '
-        
-        f'{"s/out":>5} '
-        f'{"tot":>4} '
-        f'{"s/extra":>7}'
-    )
+    @property
+    def total_power(self) -> float:
+        return sum(s.power_total for s in self.recipes)
 
-    for s in solved:
+    @property
+    def total_shards(self) -> int:
+        return sum(s.shards_total for s in self.recipes)
+
+    def print(self):
         print(
-            f'{s.recipe.name:40} '
-            f'{s.clock_each:>5.0f} '
-            f'{s.n:>2} '
+            f'{"Recipe":40} '
+            f'{"Clock":5} '
+            f'{"n":>2} '
             
-            f'{s.power_each/1e6:>6.2f} '
-            f'{s.power_total/1e6:>6.2f} '
-            
-            f'{s.shards_each:>6} '
-            f'{s.shards_total:>3} '
-            
-            f'{s.secs_per_output_each:>5.1f} '
-            f'{s.secs_per_output_total:>4.1f} '
-            f'{s.recipe.secs_per_extra(rates):>7}'
+            f'{"P (MW)":>6} {"tot":>6} '
+            f'{"shards":>6} {"tot":>3} '
+            f'{"s/out":>5} {"tot":>4} {"s/extra":>7}'
         )
 
-    print(
-        f'{"Total":40} '
-        f'{"":5} '
-        f'{sum(s.n for s in solved):>2} '
-        
-        f'{"":6} '
-        f'{sum(s.power_total for s in solved)/1e6:>6.2f} '
-        
-        f'{"":6} '
-        f'{sum(s.shards_total for s in solved):>3} '
-    )
+        for s in self.recipes:
+            print(
+                f'{s.recipe.name:40} '
+                f'{s.clock_each:>5.0f} '
+                f'{s.n:>2} '
+                
+                f'{s.power_each/1e6:>6.2f} {s.power_total/1e6:>6.2f} '
+                f'{s.shards_each:>6} {s.shards_total:>3} '
+                f'{s.secs_per_output_each:>5.1f} {s.secs_per_output_total:>4.1f} '
+                f'{s.recipe.secs_per_extra(self.rates):>7}'
+            )
+
+        print(
+            f'{"Total":40} '
+            f'{"":5} {self.total_buildings:>2} '
+            f'{"":6} {self.total_power/1e6:>6.2f} '
+            f'{"":6} {self.total_shards:>3}'
+        )
 
 
 def main():
@@ -644,14 +649,13 @@ def main():
     logger.info(f'{len(percentages)} recipes in solution.')
 
     logger.info('Nonlinear stage...')
-    solved = SolvedRecipe.solve_all(
-        recipes, percentages,
+    soln = Solution.solve(
+        recipes, percentages, rates,
         minimize=PowerObjective.POWER,
         max_buildings=50,
         max_power=100e6,
     )
-
-    print_power(solved, rates)
+    soln.print()
 
 
 if __name__ == '__main__':
