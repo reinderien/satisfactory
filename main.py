@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import logging
+import math
 import os
 import pickle
 import re
@@ -86,6 +87,14 @@ class Recipe:
     @property
     def base_power(self) -> float:
         return self.BASE_POWERS[self.crafted_in]
+
+    @property
+    def first_output(self) -> str:
+        return next(
+            resource
+            for resource, rate in self.rates.items()
+            if rate > 0
+        )
 
     def __str__(self):
         return self.name
@@ -193,12 +202,7 @@ class Recipe:
             )
 
     def secs_per_extra(self, rates: Dict[str, float]) -> str:
-        first_output = next(
-            resource
-            for resource, rate in self.rates.items()
-            if rate > 0
-        )
-        rate = rates[first_output]
+        rate = rates[self.first_output]
         if rate < 1e-6:
             return '∞'
         return f'{1/rate:.1f}'
@@ -449,6 +453,26 @@ class SolvedRecipe:
     def power_total(self) -> float:
         return self.power_each * self.n
 
+    @property
+    def secs_per_output_each(self) -> float:
+        return self.secs_per_output_total * self.n
+
+    @property
+    def secs_per_output_total(self) -> float:
+        rate = self.clock_total/100 * self.recipe.rates[self.recipe.first_output]
+        return 1/rate
+
+    @property
+    def shards_each(self) -> int:
+        return max(
+            0,
+            math.ceil(self.clock_each/50) - 2,
+        )
+
+    @property
+    def shards_total(self) -> int:
+        return self.shards_each * self.n
+
     def __str__(self):
         return f'{self.recipe} ×{self.n}'
 
@@ -535,8 +559,15 @@ def print_power(solved: Collection[SolvedRecipe], rates: Dict[str, float]):
         f'{"Recipe":40} '
         f'{"Clock":5} '
         f'{"n":>2} '
+        
         f'{"P (MW)":>6} '
-        f'{"Ptot":>6} '
+        f'{"tot":>6} '
+        
+        f'{"shards":>6} '
+        f'{"tot":>3} '
+        
+        f'{"s/out":>5} '
+        f'{"tot":>4} '
         f'{"s/extra":>7}'
     )
 
@@ -545,8 +576,15 @@ def print_power(solved: Collection[SolvedRecipe], rates: Dict[str, float]):
             f'{s.recipe.name:40} '
             f'{s.clock_each:>5.0f} '
             f'{s.n:>2} '
+            
             f'{s.power_each/1e6:>6.2f} '
             f'{s.power_total/1e6:>6.2f} '
+            
+            f'{s.shards_each:>6} '
+            f'{s.shards_total:>3} '
+            
+            f'{s.secs_per_output_each:>5.1f} '
+            f'{s.secs_per_output_total:>4.1f} '
             f'{s.recipe.secs_per_extra(rates):>7}'
         )
 
@@ -554,8 +592,12 @@ def print_power(solved: Collection[SolvedRecipe], rates: Dict[str, float]):
         f'{"Total":40} '
         f'{"":5} '
         f'{sum(s.n for s in solved):>2} '
+        
         f'{"":6} '
         f'{sum(s.power_total for s in solved)/1e6:>6.2f} '
+        
+        f'{"":6} '
+        f'{sum(s.shards_total for s in solved):>3} '
     )
 
 
