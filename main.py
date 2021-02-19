@@ -192,6 +192,17 @@ class Recipe:
                 },
             )
 
+    def secs_per_extra(self, rates: Dict[str, float]) -> str:
+        first_output = next(
+            resource
+            for resource, rate in self.rates.items()
+            if rate > 0
+        )
+        rate = rates[first_output]
+        if rate < 1e-6:
+            return '∞'
+        return f'{1/rate:.1f}'
+
 
 def fill_missing(
     session: Session, recipes: Collection[Recipe]
@@ -212,7 +223,7 @@ def fill_missing(
         yield from Recipe.from_ore_page(missing_input)
 
 
-def get_recipes(tier_before: int) -> List[Recipe]:
+def get_recipes(tier_before: int) -> Dict[str, Recipe]:
     with Session() as session:
         component_text, = get_api(session, titles='Template:ItemNav')
         component_names = parse_template(component_text, tier_before)
@@ -228,10 +239,10 @@ def get_recipes(tier_before: int) -> List[Recipe]:
         ))
         recipes.extend(fill_missing(session, recipes))
 
-    return recipes
+    return {r.name: r for r in recipes}
 
 
-def load_recipes(tier_before: int) -> List[Recipe]:
+def load_recipes(tier_before: int) -> Dict[str, Recipe]:
     fn = Path('.recipes')
     if fn.exists():
         with fn.open('rb') as f:
@@ -245,7 +256,7 @@ def load_recipes(tier_before: int) -> List[Recipe]:
 
 
 def setup_linprog(
-    recipes: Collection[Recipe],
+    recipes: Dict[str, Recipe],
     fixed_recipe_percentages: Dict[str, int],
 ):
     """
@@ -280,7 +291,7 @@ def setup_linprog(
     - no resource rate may be below zero or the solution will be unsustainable
     - selected recipes will be fixed to a desired output percentage
     """
-    resources = sorted({p for r in recipes for p in r.rates.keys()})
+    resources = sorted({p for r in recipes.values() for p in r.rates.keys()})
     resource_indices: Dict[str, int] = {
         r: i
         for i, r in enumerate(resources, 1)
@@ -305,7 +316,7 @@ def setup_linprog(
             0, float('inf'),  # Lower and upper boundaries
         )
 
-    for j, recipe in enumerate(recipes, 1):
+    for j, recipe in enumerate(recipes.values(), 1):
         lp.glp_set_col_name(problem, j, recipe.name)
 
         # The game's clock scaling resolution is one percentage point, so we
@@ -386,7 +397,7 @@ def level_for_parm() -> int:
     return lp.GLP_MSG_OFF
 
 
-def solve_linprog(problem) -> Iterable[Tuple[str, float]]:
+def solve_linprog(problem):
     level = level_for_parm()
 
     parm = lp.glp_smcp()
@@ -401,6 +412,16 @@ def solve_linprog(problem) -> Iterable[Tuple[str, float]]:
     check_lp(lp.glp_intopt(problem, parm))
     log_soln(problem, 'mip')
 
+
+def get_rates(problem) -> Iterable[Tuple[str, float]]:
+    for i in range(1, 1 + lp.glp_get_num_rows(problem)):
+        yield (
+            lp.glp_get_row_name(problem, i),
+            lp.glp_mip_row_val(problem, i) / 100,
+        )
+
+
+def get_clocks(problem) -> Iterable[Tuple[str, float]]:
     for j in range(1, 1 + lp.glp_get_num_cols(problem)):
         clock = lp.glp_mip_col_val(problem, j)
         if clock:
@@ -432,7 +453,7 @@ class SolvedRecipe:
     @classmethod
     def solve_all(
         cls,
-        recipes: Collection[Recipe],
+        recipes: Dict[str, Recipe],
         percentages: Dict[str, float],
         max_buildings: int,
     ) -> List['SolvedRecipe']:
@@ -446,9 +467,8 @@ class SolvedRecipe:
         that minimizes power consumption.
         """
 
-        recipes_by_name = {r.name: r for r in recipes}
         rate_items: Collection[Tuple[Recipe, float]] = [
-            (recipes_by_name[recipe], rate)
+            (recipes[recipe], rate)
             for recipe, rate in percentages.items()
         ]
 
@@ -497,14 +517,14 @@ class SolvedRecipe:
         )
 
 
-def print_power(solved: Collection[SolvedRecipe]):
+def print_power(solved: Collection[SolvedRecipe], rates: Dict[str, float]):
     print(
         f'{"Recipe":40} '
         f'{"Clock":5} '
         f'{"n":>2} '
         f'{"P (MW)":>6} '
         f'{"Ptot":>6} '
-        f'Residual'
+        f'{"s/extra":>7}'
     )
 
     for s in solved:
@@ -512,9 +532,18 @@ def print_power(solved: Collection[SolvedRecipe]):
             f'{s.recipe.name:40} '
             f'{s.clock_each:>5.0f} '
             f'{s.n:>2} '
-            f'{s.power_each/1e6:6.2f} '
-            f'{s.power_total/1e6:6.2f} '
+            f'{s.power_each/1e6:>6.2f} '
+            f'{s.power_total/1e6:>6.2f} '
+            f'{s.recipe.secs_per_extra(rates):>7}'
         )
+
+    print(
+        f'{"Total":40} '
+        f'{"":5} '
+        f'{sum(s.n for s in solved):>2} '
+        f'{"":6} '
+        f'{sum(s.power_total for s in solved)/1e6:>6.2f} '
+    )
 
 
 def main():
@@ -533,12 +562,16 @@ def main():
             'Smart Plating': 100,
         },
     )
-    percentages = dict(solve_linprog(problem))
+    solve_linprog(problem)
+    percentages = dict(get_clocks(problem))
+    rates = dict(get_rates(problem))
     logger.info(f'{len(percentages)} recipes in system.')
 
     logger.info('Nonlinear stage...')
     solved = SolvedRecipe.solve_all(recipes, percentages, 50)
-    print_power(solved)
+
+    print_power(solved, rates)
 
 
-main()
+if __name__ == '__main__':
+    main()
