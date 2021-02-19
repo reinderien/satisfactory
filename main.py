@@ -498,7 +498,23 @@ class SolvedRecipe:
 
 
 def print_power(solved: Collection[SolvedRecipe]):
-    return
+    print(
+        f'{"Recipe":40} '
+        f'{"Clock":5} '
+        f'{"n":>2} '
+        f'{"P (MW)":>6} '
+        f'{"Ptot":>6} '
+        f'Residual'
+    )
+
+    for s in solved:
+        print(
+            f'{s.recipe.name:40} '
+            f'{s.clock_each:>5.0f} '
+            f'{s.n:>2} '
+            f'{s.power_each/1e6:6.2f} '
+            f'{s.power_total/1e6:6.2f} '
+        )
 
 
 def main():
