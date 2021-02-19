@@ -473,14 +473,32 @@ class SolvedRecipe:
         m.Minimize(power)
         m.solve(disp=logger.level <= logging.DEBUG)
 
-        return [
+        solved = (
             cls(
                 recipe=recipe,
                 n=int(building.value[0]),
                 clock_total=int(clock),
-            )
+            ).distribute()
             for building, (recipe, clock) in zip(buildings, rate_items)
-        ]
+        )
+        return list(chain.from_iterable(solved))
+
+    def distribute(self) -> Tuple['SolvedRecipe', ...]:
+        quo, rem = divmod(self.clock_total, self.n)
+        if not rem:
+            return self,
+
+        y = self.clock_total - quo*self.n
+        x = self.n - y
+
+        return (
+            SolvedRecipe(self.recipe, x, x*quo),
+            SolvedRecipe(self.recipe, y, y*(quo+1)),
+        )
+
+
+def print_power(solved: Collection[SolvedRecipe]):
+    return
 
 
 def main():
@@ -504,6 +522,7 @@ def main():
 
     logger.info('Nonlinear stage...')
     solved = SolvedRecipe.solve_all(recipes, percentages, 50)
+    print_power(solved)
 
 
 main()
