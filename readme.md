@@ -29,8 +29,8 @@ The MediaWiki API allows this to be done in only three requests, which is nice;
 and the whole thing is completed extremely quickly - so quickly, in fact, that
 I haven't found it necessary to cache anything locally.
 
-Analysis
---------
+Linear Analysis
+---------------
 
 So let's analyse the data. I'll not make the same mistake again in pursuing an
 optimization package that's missing Mixed-Integer Linear Programming (MIP).
@@ -44,12 +44,19 @@ GLPK 5.0 is a new version of an old (2000) and well-established library. The
 one-based indexing is dumb, and parts of the documentation are a little awkward,
 but the algorithmic accuracy and performance are excellent.
 
-I want to ask the solver, e.g. "for assemblers running at full tilt, one each
-to produce rotors, modular frames and smart plating, tell me the minimum factory
-configuration needed to supply them". Translating this into GLPK speak,
+I want to ask the solver something like:
 
-- The _structural variables_ are in a vector, each element being a count of a
-  given recipe; a.k.a. the number of buildings running that recipe
+- Consider a selected collection of recipes at the output - rotors, modular 
+  frames and smart plating in this example
+- Provide for each running at 100% clock, or having multiple instances whose
+  clocks sum to 100%
+- Tell me the minimum factory configuration needed to supply them
+
+Translating this into GLPK speak,
+
+- The _structural variables_ are in a vector, each element being a clock total
+  of a given recipe; a.k.a. the sum of the clocks for all buildings running that 
+  recipe
 - The _auxiliary variables_ are in another vector, each element being the rate
   of production of a given resource (consumption is negative).
 - The _bounds_ are the minimum and maximum for each of the structural and
@@ -57,7 +64,7 @@ configuration needed to supply them". Translating this into GLPK speak,
   else the factory will run out. The bounds are also used to pre-set a desired 
   rate of production for a given resource or count of a given recipe.
 - The _objective function_ is a scalar number, a cost to minimize, in our case
-  the building count (constructors, assemblers, smelters and miners)
+  the grand total of all clocks in constructors, assemblers, smelters and miners
 - The _objective coefficients_ represent how expensive each recipe is to us.
   Currently this doesn't matter so we set every one to 1.
 - The _constraint coefficient matrix_ is a grid of all resource rates for all
@@ -66,15 +73,16 @@ configuration needed to supply them". Translating this into GLPK speak,
 The vast majority of the code interacting with GLPK is to tell it about all of
 the above. Once we have, getting to a solution is easy:
 
-- Run the [Dantzig Simplex Algorithm](https://en.wikipedia.org/wiki/Simplex_algorithm)
+- Run the
+  [Dantzig Simplex Algorithm](https://en.wikipedia.org/wiki/Simplex_algorithm)
   to get what GLPK calls a "basis" - an initial solution that allows for
-  fractional recipe counts
-- To reduce the fractional recipe counts to whole-integer recipe counts, run the
+  fractional clock counts
+- To reduce the fractional clock counts to whole-integer percentages, run the
   [branch-and-bound](https://en.wikipedia.org/wiki/Branch_and_bound)
   MIP solver.
   
-Output
-------
+Linear Output
+-------------
 
 Currently - for a maximum tech tier of 2, and asking for the three output
 recipes mentioned above - this produces:
@@ -84,8 +92,8 @@ Fetching recipe data...
 
 GLPK Simplex Optimizer 5.0
 23 rows, 28 columns, 51 non-zeros
-      0: obj =   3.000000000e+00 inf =   2.283e+00 (3)
-      6: obj =   1.917500000e+01 inf =   0.000e+00 (0)
+      0: obj =   3.000000000e+02 inf =   2.283e+02 (3)
+      6: obj =   1.917500000e+03 inf =   0.000e+00 (0)
 OPTIMAL LP SOLUTION FOUND
 
 GLPK Integer Optimizer 5.0
@@ -94,8 +102,8 @@ GLPK Integer Optimizer 5.0
 Integer optimization begins...
 Long-step dual simplex will be used
 +     6: mip =     not found yet >=              -inf        (1; 0)
-Solution found by heuristic: 22
-+    10: mip =   2.200000000e+01 >=     tree is empty   0.0% (0; 3)
+Solution found by heuristic: 1918
++     6: mip =   1.918000000e+03 >=     tree is empty   0.0% (0; 1)
 INTEGER OPTIMAL SOLUTION FOUND
 Writing MIP solution to '/tmp/tmps17rs8ja'...
 Problem:    satisfactory
@@ -103,7 +111,7 @@ Rows:       23
 Columns:    28 (28 integer, 0 binary)
 Non-zeros:  51
 Status:     INTEGER OPTIMAL
-Objective:  n_buildings = 22 (MINimum)
+Objective:  percentage_sum = 1918 (MINimum)
 
    No.   Row name        Activity     Lower bound   Upper bound
 ------ ------------    ------------- ------------- -------------
@@ -116,21 +124,21 @@ Objective:  n_buildings = 22 (MINimum)
      6 Copper Ingot                0             0               
      7 Copper Ore                  0             0               
      8 Copper Sheet                0             0               
-     9 Iron Ingot               0.25             0               
-    10 Iron Ore                  0.5             0               
-    11 Iron Plate           0.166667             0               
-    12 Iron Rod                 0.05             0               
+     9 Iron Ingot                  0             0               
+    10 Iron Ore                    1             0               
+    11 Iron Plate                  0             0               
+    12 Iron Rod                    0             0               
     13 Leaves                      0             0               
     14 Limestone                   0             0               
     15 Modular Frame
-                           0.0333333             0               
+                             3.33333             0               
     16 Mycelia                     0             0               
     17 Reinforced Iron Plate
                                    0             0               
-    18 Rotor               0.0333333             0               
+    18 Rotor                 3.33333             0               
     19 Screw                       0             0               
     20 Smart Plating
-                           0.0333333             0               
+                             3.33333             0               
     21 Solid Biofuel
                                    0             0               
     22 Wire                        0             0               
@@ -152,17 +160,17 @@ Objective:  n_buildings = 22 (MINimum)
      7 Concrete     *              0             0               
      8 Copper Ingot *              0             0               
      9 Copper Sheet *              0             0               
-    10 Iron Ingot   *              5             0               
-    11 Iron Plate   *              2             0               
-    12 Iron Rod     *              5             0               
+    10 Iron Ingot   *            390             0               
+    11 Iron Plate   *            150             0               
+    12 Iron Rod     *            480             0               
     13 Modular Frame
-                    *              1             1             = 
+                    *            100           100             = 
     14 Reinforced Iron Plate
-                    *              1             0               
-    15 Rotor        *              1             1             = 
-    16 Screw        *              4             0               
+                    *            100             0               
+    15 Rotor        *            100           100             = 
+    16 Screw        *            400             0               
     17 Smart Plating
-                    *              1             1             = 
+                    *            100           100             = 
     18 Solid Biofuel
                     *              0             0               
     19 Wire         *              0             0               
@@ -175,9 +183,9 @@ Objective:  n_buildings = 22 (MINimum)
     23 Iron Ore from Miner Mk. 1 on Impure node
                     *              0             0               
     24 Iron Ore from Miner Mk. 1 on Normal node
-                    *              1             0               
+                    *              0             0               
     25 Iron Ore from Miner Mk. 1 on Pure node
-                    *              1             0               
+                    *             98             0               
     26 Limestone from Miner Mk. 1 on Impure node
                     *              0             0               
     27 Limestone from Miner Mk. 1 on Normal node
@@ -191,8 +199,8 @@ KKT.PE: max.abs.err = 0.00e+00 on row 0
         max.rel.err = 0.00e+00 on row 0
         High quality
 
-KKT.PB: max.abs.err = 2.22e-16 on row 19
-        max.rel.err = 2.22e-16 on row 19
+KKT.PB: max.abs.err = 5.68e-14 on row 19
+        max.rel.err = 5.68e-14 on row 19
         High quality
 
 End of output
@@ -202,5 +210,82 @@ Interpreting this:
 
 - Any variable with an `=` to the right is a fixed recipe I'm asking for at the
   output
-- _Activity_ for the row section is the resource rate per second
-- _Activity_ for the column section is the recipe (building) count
+- _Activity_ for the row section is the resource rate per second times 100
+- _Activity_ for the column section is the recipe's total clock
+
+Non-linear Analysis
+-------------------
+
+[Coffeestain](https://www.coffeestainstudios.com) just had to throw a wrench in
+the works. Input and output resources scale linearly based on the clock selected
+for a building, but power does not. It scales with an exponent of 1.6. So we
+have a secondary optimization problem classified as Mixed-Integer Nonlinear
+Programming (MINLP). It's somewhat harder to find libraries for this. scipy just
+can't, and GLPK just can't. One convenient solution is
+[APMonitor](https://apmonitor.com), with its Python bindings in
+[Gekko](https://gekko.readthedocs.io). APMonitor is apparently
+pseudo-commercial, being distributed in binary form and requiring a paid license 
+for some features; but the free level worked quite well for me and doesn't even 
+come with nags.
+
+Gekko has a sympy-like symbolic expression language that can directly translate
+Python expressions to constraints and objectives, so it's definitely not as low-
+level as GLPK. Our problem setup becomes:
+
+- We need to select the `APOPT` solver and tell it that we're using integer
+  variables
+- Make one integer variable for each non-zero recipe from the previous (linear)
+  stage, which will represent the actual building count. The higher each of 
+  these counts, the lower the individual (and total) power will be.
+- Form an expression for the total power based on the `**1.6` exponentiation,
+  and tell the optimizer to minimize this.
+- Form another expression to limit the total building count. If we don't do
+  this, the best solution will be to build infinite buildings for each recipe.
+  For this example the limit has been set to 50.
+  
+A successful run looks like:
+
+```
+ ----------------------------------------------------------------
+ APMonitor, Version 0.9.2
+ APMonitor Optimization Suite
+ ----------------------------------------------------------------
+ 
+ 
+ --------- APM Model Size ------------
+ Each time step contains
+   Objects      :  0
+   Constants    :  0
+   Variables    :  10
+   Intermediates:  0
+   Connections  :  0
+   Equations    :  2
+   Residuals    :  2
+ 
+ Number of state variables:    10
+ Number of total equations: -  1
+ Number of slack variables: -  1
+ ---------------------------------------
+ Degrees of freedom       :    8
+ 
+ ----------------------------------------------
+ Steady State Optimization with APOPT Solver
+ ----------------------------------------------
+Iter:     1 I:  0 Tm:      0.00 NLPi:   26 Dpth:    0 Lvs:    3 Obj:  6.37E+07 Gap:       NaN
+Iter:     2 I:  0 Tm:      0.00 NLPi:    4 Dpth:    1 Lvs:    5 Obj:  6.39E+07 Gap:       NaN
+...
+Iter:    24 I:  0 Tm:      0.00 NLPi:    7 Dpth:    6 Lvs:   41 Obj:  6.39E+07 Gap:       NaN
+--Integer Solution:   6.39E+07 Lowest Leaf:   6.38E+07 Gap:   1.06E-03
+Iter:    25 I:  0 Tm:     -0.00 NLPi:    1 Dpth:    2 Lvs:   41 Obj:  6.39E+07 Gap:  1.06E-03
+ Successful solution
+ 
+ ---------------------------------------------------
+ Solver         :  APOPT (v1.0)
+ Solution time  :  0.074 sec
+ Objective      :  6.3868226807873145E+7
+ Successful solution
+ ---------------------------------------------------
+```
+
+Interpreting this, the optimizer runs very quickly until it finds the best total
+power consumption of 63.9 MW.
