@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from itertools import count, chain
 from pathlib import Path
 from tempfile import NamedTemporaryFile
-from typing import ClassVar, Collection, Dict, Iterable, List, Pattern, Tuple
+from typing import ClassVar, Collection, Dict, Iterable, List, Pattern, Tuple, Optional
 
 from gekko import GEKKO
 from requests import Session
@@ -243,6 +243,8 @@ def get_recipes(tier_before: int) -> Dict[str, Recipe]:
 
 
 def load_recipes(tier_before: int) -> Dict[str, Recipe]:
+    logger.info(f'Loading recipe database up to tier {tier_before-1}...')
+
     fn = Path('.recipes')
     if fn.exists():
         with fn.open('rb') as f:
@@ -455,7 +457,8 @@ class SolvedRecipe:
         cls,
         recipes: Dict[str, Recipe],
         percentages: Dict[str, float],
-        max_buildings: int,
+        max_buildings: Optional[int] = None,
+        max_power: Optional[float] = None,
     ) -> List['SolvedRecipe']:
         """
         At this point, we have a total percentage for each recipe, but no choice
@@ -478,19 +481,29 @@ class SolvedRecipe:
         m.options.solver = APOPT
         m.solver_options = ['minlp_as_nlp 0']
 
-        # Equivalent to structural variables
         buildings = [
             m.Var(integer=True, name=recipe.name, lb=1)
             for recipe, rate in rate_items
         ]
+        powers = [
+            build_var**-0.6 * (clock/100)**1.6 * recipe.base_power
+            for build_var, (recipe, clock) in zip(buildings, rate_items)
+        ]
 
-        power = 0
-        for build_var, (recipe, clock) in zip(buildings, rate_items):
-            p = build_var**-0.6 * (clock/100)**1.6 * recipe.base_power
-            power = p + power
+        for (recipe, clock), building in zip(rate_items, buildings):
+            m.Equation(clock/building <= 250)
 
-        m.Equation(sum(buildings) <= max_buildings)
-        m.Minimize(power)
+        if max_buildings is not None:
+            logger.info(f'Minimizing power for at most {max_buildings} buildings:')
+            m.Equation(sum(buildings) <= max_buildings)
+            m.Minimize(sum(powers))
+        elif max_power is not None:
+            logger.info(f'Minimizing buildings for at most {max_power/1e6:.0f} MW power:')
+            m.Equation(sum(powers) <= max_power)
+            m.Minimize(sum(buildings))
+        else:
+            raise ValueError('Need a limit')
+
         m.solve(disp=logger.level <= logging.DEBUG)
 
         solved = (
@@ -565,10 +578,10 @@ def main():
     solve_linprog(problem)
     percentages = dict(get_clocks(problem))
     rates = dict(get_rates(problem))
-    logger.info(f'{len(percentages)} recipes in system.')
+    logger.info(f'{len(percentages)} recipes in solution.')
 
     logger.info('Nonlinear stage...')
-    solved = SolvedRecipe.solve_all(recipes, percentages, 50)
+    solved = SolvedRecipe.solve_all(recipes, percentages, max_buildings=50)
 
     print_power(solved, rates)
 
