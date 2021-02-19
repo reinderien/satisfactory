@@ -5,6 +5,7 @@ import os
 import pickle
 import re
 from dataclasses import dataclass
+from enum import Enum
 from itertools import count, chain
 from pathlib import Path
 from tempfile import NamedTemporaryFile
@@ -435,6 +436,11 @@ def get_clocks(problem) -> Iterable[Tuple[str, float]]:
             yield name, clock
 
 
+class PowerObjective(Enum):
+    POWER = 'power'
+    BUILDINGS = 'buildings'
+
+
 @dataclass
 class SolvedRecipe:
     recipe: Recipe
@@ -481,6 +487,7 @@ class SolvedRecipe:
         cls,
         recipes: Dict[str, Recipe],
         percentages: Dict[str, float],
+        minimize: PowerObjective,
         max_buildings: Optional[int] = None,
         max_power: Optional[float] = None,
     ) -> List['SolvedRecipe']:
@@ -509,24 +516,38 @@ class SolvedRecipe:
             m.Var(integer=True, name=recipe.name, lb=1)
             for recipe, rate in rate_items
         ]
+        building_total = sum(buildings)
+
         powers = [
             build_var**-0.6 * (clock/100)**1.6 * recipe.base_power
             for build_var, (recipe, clock) in zip(buildings, rate_items)
         ]
+        power_total = sum(powers)
 
         for (recipe, clock), building in zip(rate_items, buildings):
             m.Equation(clock/building <= 250)
 
-        if max_buildings is not None:
-            logger.info(f'Minimizing power for at most {max_buildings} buildings:')
-            m.Equation(sum(buildings) <= max_buildings)
-            m.Minimize(sum(powers))
-        elif max_power is not None:
-            logger.info(f'Minimizing buildings for at most {max_power/1e6:.0f} MW power:')
-            m.Equation(sum(powers) <= max_power)
-            m.Minimize(sum(buildings))
+        limit_strs = []
+        if max_buildings is None:
+            if minimize == PowerObjective.POWER:
+                raise ValueError('Min power requires a building limit')
         else:
-            raise ValueError('Need a limit')
+            m.Equation(building_total <= max_buildings)
+            limit_strs.append(f'{max_buildings} buildings')
+
+        if max_power is not None:
+            m.Equation(power_total <= max_power)
+            limit_strs.append(f'{max_power/1e6:.0f} MW power')
+
+        if minimize == PowerObjective.BUILDINGS:
+            m.Minimize(building_total)
+        elif minimize == PowerObjective.POWER:
+            m.Minimize(power_total)
+
+        msg = f'Minimizing {minimize.value}'
+        if limit_strs:
+            msg += ' for at most ' + ' and '.join(limit_strs)
+        logger.info(msg)
 
         m.solve(disp=logger.level <= logging.DEBUG)
 
@@ -623,7 +644,12 @@ def main():
     logger.info(f'{len(percentages)} recipes in solution.')
 
     logger.info('Nonlinear stage...')
-    solved = SolvedRecipe.solve_all(recipes, percentages, max_buildings=50)
+    solved = SolvedRecipe.solve_all(
+        recipes, percentages,
+        minimize=PowerObjective.POWER,
+        max_buildings=50,
+        max_power=100e6,
+    )
 
     print_power(solved, rates)
 

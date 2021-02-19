@@ -250,16 +250,20 @@ low-level as GLPK. Our problem setup becomes:
 - Make one integer variable for each non-zero recipe from the previous (linear)
   stage, which will represent the actual building count. The higher each of 
   these counts, the lower the individual (and total) power will be.
-- Form an expression for the total power based on the `**1.6` exponentiation,
-  and tell the optimizer to minimize this.
-- Form another expression to limit the total building count. If we don't do
-  this, the best solution will be to build infinite buildings for each recipe.
-  For this example the limit has been set to 50.
+- Form an expression for each recipe, limiting the maximum clock for each
+  building to 250% (the highest possible with three shards added).
+- Form an expression for the total power based on the `**1.6` exponentiation.
+- Form an expression for the total building count.
+- Either minimize power, given a building limit; or minimize buildings, given a
+  power limit. If we don't do this, the best solution for minimum power will be 
+  to build infinite buildings for each recipe; and the best solution for minimum
+  buildings will eat up a tonne of shards and power.
+
+For this example the power limit has been set to 105 MW.
   
 A successful run looks like:
 
 ```
- ----------------------------------------------------------------
  APMonitor, Version 0.9.2
  APMonitor Optimization Suite
  ----------------------------------------------------------------
@@ -267,38 +271,62 @@ A successful run looks like:
  
  --------- APM Model Size ------------
  Each time step contains
-   Objects      :  0
-   Constants    :  0
-   Variables    :  10
-   Intermediates:  0
-   Connections  :  0
-   Equations    :  2
-   Residuals    :  2
+   Objects      :            0
+   Constants    :            0
+   Variables    :           19
+   Intermediates:            0
+   Connections  :            0
+   Equations    :           11
+   Residuals    :           11
  
- Number of state variables:    10
- Number of total equations: -  1
- Number of slack variables: -  1
+ Number of state variables:             19
+ Number of total equations: -           10
+ Number of slack variables: -           10
  ---------------------------------------
- Degrees of freedom       :    8
+ Degrees of freedom       :             -1
  
+ * Warning: DOF <= 0
  ----------------------------------------------
  Steady State Optimization with APOPT Solver
  ----------------------------------------------
-Iter:     1 I:  0 Tm:      0.00 NLPi:   26 Dpth:    0 Lvs:    3 Obj:  6.37E+07 Gap:       NaN
-Iter:     2 I:  0 Tm:      0.00 NLPi:    4 Dpth:    1 Lvs:    5 Obj:  6.39E+07 Gap:       NaN
+Iter:     1 I:  0 Tm:      0.00 NLPi:   14 Dpth:    0 Lvs:    3 Obj:  2.18E+01 Gap:       NaN
+Iter:     2 I:  0 Tm:      0.00 NLPi:    6 Dpth:    1 Lvs:    4 Obj:  2.25E+01 Gap:       NaN
 ...
-Iter:    24 I:  0 Tm:      0.00 NLPi:    7 Dpth:    6 Lvs:   41 Obj:  6.39E+07 Gap:       NaN
---Integer Solution:   6.39E+07 Lowest Leaf:   6.38E+07 Gap:   1.06E-03
-Iter:    25 I:  0 Tm:     -0.00 NLPi:    1 Dpth:    2 Lvs:   41 Obj:  6.39E+07 Gap:  1.06E-03
+Iter:    63 I:  0 Tm:      0.00 NLPi:    7 Dpth:    9 Lvs:   81 Obj:  2.31E+01 Gap:       NaN
+Iter:    64 I:  0 Tm:      0.00 NLPi:    7 Dpth:    9 Lvs:   82 Obj:  2.31E+01 Gap:       NaN
+--Integer Solution:   2.20E+01 Lowest Leaf:   2.20E+01 Gap:   1.92E-03
+Iter:    65 I:  0 Tm:      0.00 NLPi:    2 Dpth:    9 Lvs:   82 Obj:  2.20E+01 Gap:  1.92E-03
  Successful solution
  
  ---------------------------------------------------
  Solver         :  APOPT (v1.0)
- Solution time  :  0.074 sec
- Objective      :  6.3868226807873145E+7
+ Solution time  :   5.739999999059364E-002 sec
+ Objective      :    22.0000000000000     
  Successful solution
  ---------------------------------------------------
 ```
 
-Interpreting this, the optimizer runs very quickly until it finds the best total
-power consumption of 63.9 MW.
+Interpreting this, the optimizer runs very quickly until it finds the smallest
+possible building count of 22. With a logging level of `INFO`, the program from
+start to finish shows:
+
+```
+Loading recipe database up to tier 2...
+28 recipes loaded.
+Linear stage...
+9 recipes in solution.
+Nonlinear stage...
+Minimizing buildings for at most 105 MW power:
+Recipe                                   Clock  n P (MW)    tot shards tot s/out  tot s/extra
+Iron Ingot                                  97  2   3.81   7.62      0   0   2.1  1.0       ∞
+Iron Ingot                                  98  2   3.87   7.75      0   0   2.0  1.0       ∞
+Iron Plate                                 150  1   7.65   7.65      1   1   2.0  2.0       ∞
+Iron Rod                                   120  4   5.35  21.42      1   4   3.3  0.8       ∞
+Modular Frame                               50  2   4.95   9.90      0   0  60.0 30.0    30.0
+Reinforced Iron Plate                       50  2   4.95   9.90      0   0  24.0 12.0       ∞
+Rotor                                       50  2   4.95   9.90      0   0  30.0 15.0    30.0
+Screw                                      100  4   4.00  16.00      0   0   1.5  0.4       ∞
+Smart Plating                               50  2   4.95   9.90      0   0  60.0 30.0    30.0
+Iron Ore from Miner Mk. 1 on Pure node      98  1   4.84   4.84      0   0   0.5  0.5   100.0
+Total                                          22        104.86          5 
+```
