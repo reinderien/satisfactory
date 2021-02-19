@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
-
+import os
+import pickle
 import re
 from dataclasses import dataclass
 from itertools import count, chain
+from pathlib import Path
 from shutil import copyfileobj
 from sys import stderr, stdout
 from tempfile import NamedTemporaryFile
-from typing import ClassVar, Collection, Dict, Iterable, List, Pattern
+from typing import ClassVar, Collection, Dict, Iterable, List, Pattern, Tuple
 
+from gekko import GEKKO
 from requests import Session
 import swiglpk as lp
 
@@ -64,6 +67,19 @@ class Recipe:
     rates: Dict[str, float]
 
     parse_re: ClassVar[Pattern] = re.compile(r'{{CraftingTable(.+?)}}', re.I | re.S)
+
+    BASE_POWERS: ClassVar[Dict[str, float]] = {
+        'Smelter': 4e6,
+        'Constructor': 4e6,
+        'Assembler': 15e6,
+        'Miner Mk. 1': 5e6,
+        'Miner Mk. 2': 12e6,
+        'Miner Mk. 3': 30e6,
+    }
+
+    @property
+    def base_power(self) -> float:
+        return self.BASE_POWERS[self.crafted_in]
 
     def __str__(self):
         return self.name
@@ -162,7 +178,7 @@ class Recipe:
             yield cls(
                 name=f'{attrs["recipeName"]} from '
                      f'{crafted_in} on {purity} node',
-                crafted_in=attrs["craftedIn"],
+                crafted_in=crafted_in,
                 tier=attrs['researchTier'],
                 time=float(attrs['craftingTime']),
                 rates={
@@ -204,6 +220,19 @@ def get_recipes() -> List[Recipe]:
         ))
         recipes.extend(fill_missing(session, recipes))
 
+    return recipes
+
+
+def load_recipes() -> List[Recipe]:
+    fn = Path('.recipes')
+    if fn.exists():
+        with fn.open('rb') as f:
+            return pickle.load(f)
+
+    print('Fetching recipe data...')
+    recipes = get_recipes()
+    with fn.open('wb') as f:
+        pickle.dump(recipes, f)
     return recipes
 
 
@@ -257,8 +286,8 @@ def setup_linprog(recipes: Collection[Recipe], fixed_recipe_percentages: Dict[st
         # Every resource rate must be 0 or greater for sustainability
         lp.glp_set_row_bnds(
             problem, i,
-            type=lp.GLP_LO,
-            lb=0, ub=float('inf'),
+            lp.GLP_LO,
+            0, float('inf'),  # Lower and upper boundaries
         )
 
     for j, recipe in enumerate(recipes, 1):
@@ -276,15 +305,15 @@ def setup_linprog(recipes: Collection[Recipe], fixed_recipe_percentages: Dict[st
             # All recipes must have at least 0 instances
             lp.glp_set_col_bnds(
                 problem, j,
-                type=lp.GLP_LO,
-                lb=0, ub=float('inf'),
+                lp.GLP_LO,
+                0, float('inf'),  # Lower and upper boundaries
             )
         else:
             # Set our desired (fixed) outputs
             lp.glp_set_col_bnds(
                 problem, j,
-                type=lp.GLP_FX,
-                lb=fixed, ub=fixed,
+                lp.GLP_FX,
+                fixed, fixed,  # Boundaries are equal (variable is fixed)
             )
 
         # The constraint coefficients are just the recipe rates
@@ -316,9 +345,14 @@ def check_lp(code: int):
 def print_soln(problem, kind: str='sol'):
     fun = getattr(lp, f'glp_print_{kind}')
 
-    with NamedTemporaryFile(mode='rt') as tempf:
-        assert 0 == fun(problem, fname=tempf.name)
-        copyfileobj(tempf, stdout)
+    tempf = NamedTemporaryFile(mode='w', delete=False)
+    try:
+        tempf.close()
+        assert 0 == fun(problem, tempf.name)
+        with open(tempf.name, 'rt') as f:
+            copyfileobj(f, stdout)
+    finally:
+        os.unlink(tempf.name)
 
 
 def solve_linprog(problem) -> Dict[str, float]:
@@ -334,10 +368,84 @@ def solve_linprog(problem) -> Dict[str, float]:
     }
 
 
-def main():
-    print('Fetching recipe data...')
-    recipes = get_recipes()
+@dataclass
+class SolvedRecipe:
+    recipe: Recipe
+    n: int
+    clock_total: int
 
+    @property
+    def clock_each(self) -> float:
+        return self.clock_total / self.n
+
+    @property
+    def power_each(self) -> float:
+        return self.recipe.base_power * (self.clock_each/100) ** 1.6
+
+    @property
+    def power_total(self) -> float:
+        return self.power_each * self.n
+
+    def __str__(self):
+        return f'{self.recipe} ×{self.n}'
+
+    @classmethod
+    def solve_all(
+        cls,
+        recipes: Collection[Recipe],
+        percentages: Dict[str, float],
+        max_buildings: int,
+    ) -> List['SolvedRecipe']:
+        """
+        At this point, we have a total percentage for each recipe, but no choice on
+        allocation of those percentages to a building count, considering nonlinear
+        power load and the addition of power shards.
+
+        For a given maximum building count, there will be an optimal clock scaling
+        configuration, building allocation and power shard allocation that minimizes
+        power consumption.
+        """
+
+        recipes_by_name = {r.name: r for r in recipes}
+        rate_items: Collection[Tuple[Recipe, float]] = [
+            (recipes_by_name[recipe], rate)
+            for recipe, rate in percentages.items()
+            if rate
+        ]
+
+        # No network; discontinuous problem; respect integer constraints
+        APOPT = 1
+        m = GEKKO(remote=False, name='satisfactory_power')
+        m.options.solver = APOPT
+        m.solver_options = ['minlp_as_nlp 0']
+
+        # Equivalent to structural variables
+        buildings = [
+            m.Var(integer=True, name=recipe.name, lb=1)
+            for recipe, rate in rate_items
+        ]
+
+        power = 0
+        for build_var, (recipe, clock) in zip(buildings, rate_items):
+            p = build_var**-0.6 * (clock/100)**1.6 * recipe.base_power
+            power = p + power
+
+        m.Equation(sum(buildings) <= max_buildings)
+        m.Minimize(power)
+        m.solve(disp=True)
+
+        return [
+            cls(
+                recipe=recipe,
+                n=int(building.value[0]),
+                clock_total=int(clock),
+            )
+            for building, (recipe, clock) in zip(buildings, rate_items)
+        ]
+
+
+def main():
+    recipes = load_recipes()
     problem = setup_linprog(
         recipes,
         {
@@ -350,15 +458,7 @@ def main():
     percentages = solve_linprog(problem)
     print_soln(problem, 'mip')
 
-    """
-    At this point, we have a total percentage for each recipe, but no choice on
-    allocation of those percentages to a building count, considering nonlinear
-    power load and the addition of power shards.
-    
-    For each maximum building count, there will be an optimal clock scaling
-    configuration, building allocation and power shard allocation that minimizes
-    power consumption.
-    """
+    solved = SolvedRecipe.solve_all(recipes, percentages, 50)
 
 
 main()
