@@ -346,7 +346,7 @@ class Solver:
             for name, r in recipes.items()
         }
 
-        self.shards_total = pure_sum([r.shard_total for r in self.recipes.values()])
+        self.shard_total = pure_sum([r.shard_total for r in self.recipes.values()])
         self.power_total = pure_sum([r.power_total for r in self.recipes.values()])
         self.building_total = pure_sum([r.building_total for r in self.recipes.values()])
 
@@ -371,7 +371,7 @@ class Solver:
     def print(self):
         # todo - broken
         print(
-            f'{"Recipe":40} '
+            f'{"Recipe":50} '
             f'{"Clock":5} '
             f'{"n":>2} '
             
@@ -380,23 +380,24 @@ class Solver:
             f'{"s/out":>5} {"tot":>4} {"s/extra":>7}'
         )
 
-        for s in self.recipes:
-            print(
-                f'{s.recipe.name:40} '
-                f'{s.clock_each:>5.0f} '
-                f'{s.n:>2} '
-                
-                f'{s.power_each/1e6:>6.2f} {s.power_total/1e6:>6.2f} '
-                f'{s.shards_each:>6} {s.shards_total:>3} '
-                f'{s.secs_per_output_each:>5.1f} {s.secs_per_output_total:>4.1f} '
-                f'{s.recipe.secs_per_extra(self.rates):>7}'
-            )
+        for r in self.recipes.values():
+            for s in (r.base_instance, r.fract_instance):
+                print(
+                    f'{s.name:50} '
+                    f'{s.clock_each.value.value:>5.0f} '
+                    f'{int(s.buildings.value[0]):>2} '
+                    
+                    f'{s.power_each.value/1e6:>6.2f} {s.power_total.value/1e6:>6.2f} '
+                    f'{s.shards_each.value[0]:>6} {s.shard_total.value.value:>3} '
+                    f'{0:>5.1f} {0:>4.1f} '
+                    f'{0:>7}'
+                )
 
         print(
-            f'{"Total":40} '
-            f'{"":5} {self.total_buildings:>2} '
-            f'{"":6} {self.total_power/1e6:>6.2f} '
-            f'{"":6} {self.total_shards:>3}'
+            f'{"Total":50} '
+            f'{"":5} {self.building_total.value.value:>2} '
+            f'{"":6} {self.power_total.value.value/1e6:>6.2f} '
+            f'{"":6} {self.shard_total.value.value:>3}'
         )
 
 
