@@ -1,19 +1,16 @@
 #!/usr/bin/env python3
 import logging
-import math
-import os
 import pickle
 import re
 from dataclasses import dataclass
-from enum import Enum
 from itertools import count, chain
 from pathlib import Path
-from tempfile import NamedTemporaryFile
-from typing import ClassVar, Collection, Dict, Iterable, List, Pattern, Tuple, Optional
+from typing import ClassVar, Collection, Dict, Iterable, List, Pattern, Union, Sequence
 
 from gekko import GEKKO
+from gekko.gk_operators import GK_Operators
+from gekko.gk_variable import GKVariable
 from requests import Session
-import swiglpk as lp
 
 
 logger = logging.getLogger('satisfactory')
@@ -262,341 +259,117 @@ def load_recipes(tier_before: int) -> Dict[str, Recipe]:
     return recipes
 
 
-def setup_linprog(
-    recipes: Dict[str, Recipe],
-    fixed_recipe_percentages: Dict[str, int],
-):
-    """
-    x[m+i] ("xs") is an n-vector, structural variables ("columns")
-    z is the scalar cost/objective function to minimize
-    c is an (n+1)-vector, objective coefficients; will be set to ones
+def pure_sum(seq: Sequence):
+    total = seq[0]
+    for x in seq[1:]:
+        total += x
+    return total
 
-            n
-    z = [c c c...][xs]
-                  [xs]   n
-                  [xs]
-                  [...]
 
-    x ("xr") is an m-vector, auxiliary variables ("rows")
-    a is an m*n constraint coefficient matrix
-
-    auxiliary variables are set by
-        n        1        1
-      [a a a]   [xs]     [xr]
-    m [a a a] n [xs] = m [xr]
-      [a a a]   [xs]     [xr]
-
-    bounds apply to both structural and auxiliary variables:
-    l ≤ x ≤ u
-
-    A variable is called non-basic if it has an active bound; otherwise it is
-    called basic.
-
-    For us:
-    - structural variables are all integers, one percent of each recipe instance
-    - auxiliary variables are individual resource rates (also scaled by 0.01)
-    - no resource rate may be below zero or the solution will be unsustainable
-    - selected recipes will be fixed to a desired output percentage
-    """
-    resources = sorted({p for r in recipes.values() for p in r.rates.keys()})
-    resource_indices: Dict[str, int] = {
-        r: i
-        for i, r in enumerate(resources, 1)
-    }
-    m = len(resources)
-    n = len(recipes)
-
-    problem = lp.glp_create_prob()
-    lp.glp_set_prob_name(problem, 'satisfactory')
-    lp.glp_set_obj_name(problem, 'percentage_sum')
-    lp.glp_set_obj_dir(problem, lp.GLP_MIN)
-    lp.glp_add_rows(problem, m)
-    lp.glp_add_cols(problem, n)
-
-    for i, resource in enumerate(resources, 1):
-        lp.glp_set_row_name(problem, i, resource)
-
-        # Every resource rate must be 0 or greater for sustainability
-        lp.glp_set_row_bnds(
-            problem, i,
-            lp.GLP_LO,
-            0, float('inf'),  # Lower and upper boundaries
+class RecipeInstance:
+    def __init__(
+        self,
+        recipe: Recipe,
+        m: GEKKO,
+        shards_each: GKVariable,
+        clock_percent_each: Union[GKVariable, GK_Operators],
+        suffix: str,
+    ):
+        self.buildings: GKVariable = m.Var(
+            integer=True, lb=0, name=f'{recipe.name} buildings ({suffix})',
         )
 
-    for j, recipe in enumerate(recipes.values(), 1):
-        lp.glp_set_col_name(problem, j, recipe.name)
+        self.name = f'{recipe.name} ({suffix})'
 
-        # The game's clock scaling resolution is one percentage point, so we
-        # ask for integers with an implicit scale of 100
-        lp.glp_set_col_kind(problem, j, lp.GLP_IV)
+        self.clock_percent_each = clock_percent_each
+        self.clock_each = clock = clock_percent_each / 100
+        self.shards_each = shards_each
+        self.power_each: GK_Operators = clock**1.6 * recipe.base_power
+        self.shard_total: GK_Operators = shards_each * self.buildings
+        self.power_total: GK_Operators = self.power_each * self.buildings
 
-        # All recipes are currently weighed the same
-        lp.glp_set_obj_coef(problem, j, 1)
+        self.rates_each: Dict[str, GK_Operators] = {
+            resource: clock * rate
+            for resource, rate in recipe.rates.items()
+        }
+        self.rates_total: Dict[str, GK_Operators] = {
+            resource: r*self.buildings
+            for resource, r in self.rates_each.items()
+        }
 
-        fixed = fixed_recipe_percentages.get(recipe.name)
-        if fixed is None:
-            # All recipes must have at least 0 instances
-            lp.glp_set_col_bnds(
-                problem, j,
-                lp.GLP_LO,
-                0, float('inf'),  # Lower and upper boundaries
-            )
-        else:
-            # Set our desired (fixed) outputs
-            lp.glp_set_col_bnds(
-                problem, j,
-                lp.GLP_FX,
-                fixed, fixed,  # Boundaries are equal (variable is fixed)
-            )
-
-        # The constraint coefficients are just the recipe rates
-        n_sparse = len(recipe.rates)
-        ind = lp.intArray(n_sparse + 1)
-        val = lp.doubleArray(n_sparse + 1)
-        for i, (resource, rate) in enumerate(recipe.rates.items(), 1):
-            ind[i] = resource_indices[resource]
-            val[i] = rate
-        lp.glp_set_mat_col(problem, j, n_sparse, ind, val)
-
-    lp.glp_create_index(problem)
-
-    return problem
-
-
-def check_lp(code: int):
-    if code == 0:
-        return
-
-    codes = {
-        getattr(lp, k): k
-        for k in dir(lp)
-        if k.startswith('GLP_E')
-    }
-    raise ValueError(f'gltk returned {codes[code]}')
-
-
-def log_soln(problem, kind: str):
-    if logger.level > logging.DEBUG:
-        return
-
-    fun = getattr(lp, f'glp_print_{kind}')
-
-    tempf = NamedTemporaryFile(mode='w', delete=False)
-    try:
-        tempf.close()
-        assert 0 == fun(problem, tempf.name)
-        with open(tempf.name, 'rt') as f:
-            logger.debug(f.read())
-    finally:
-        os.unlink(tempf.name)
-
-
-def level_for_parm() -> int:
-    # It's difficult (impossible?) to redirect stdout from this DLL, so just
-    # modify its verbosity to follow that of our own logger
-
-    if logger.level <= logging.DEBUG:
-        return lp.GLP_MSG_ALL
-    if logger.level <= logging.INFO:
-        return lp.GLP_MSG_ERR  # Skip over ON; too verbose
-    if logger.level <= logging.ERROR:
-        return lp.GLP_MSG_ERR
-    return lp.GLP_MSG_OFF
-
-
-def solve_linprog(problem):
-    level = level_for_parm()
-
-    parm = lp.glp_smcp()
-    lp.glp_init_smcp(parm)
-    parm.msg_lev = level
-    check_lp(lp.glp_simplex(problem, parm))
-    log_soln(problem, 'sol')
-
-    parm = lp.glp_iocp()
-    lp.glp_init_iocp(parm)
-    parm.msg_lev = level
-    check_lp(lp.glp_intopt(problem, parm))
-    log_soln(problem, 'mip')
-
-
-def get_rates(problem) -> Iterable[Tuple[str, float]]:
-    for i in range(1, 1 + lp.glp_get_num_rows(problem)):
-        yield (
-            lp.glp_get_row_name(problem, i),
-            lp.glp_mip_row_val(problem, i) / 100,
-        )
-
-
-def get_clocks(problem) -> Iterable[Tuple[str, float]]:
-    for j in range(1, 1 + lp.glp_get_num_cols(problem)):
-        clock = lp.glp_mip_col_val(problem, j)
-        if clock:
-            name = lp.glp_get_col_name(problem, j)
-            yield name, clock
-
-
-class PowerObjective(Enum):
-    POWER = 'power'
-    BUILDINGS = 'buildings'
-
-
-@dataclass
-class SolvedRecipe:
-    recipe: Recipe
-    n: int
-    clock_total: int
-
-    @property
-    def clock_each(self) -> float:
-        return self.clock_total / self.n
-
-    @property
-    def power_each(self) -> float:
-        return self.recipe.base_power * (self.clock_each/100) ** 1.6
-
-    @property
-    def power_total(self) -> float:
-        return self.power_each * self.n
-
-    @property
-    def secs_per_output_each(self) -> float:
-        return self.secs_per_output_total * self.n
-
-    @property
-    def secs_per_output_total(self) -> float:
-        rate = self.clock_total/100 * self.recipe.rates[self.recipe.first_output]
-        return 1/rate
-
-    @property
-    def shards_each(self) -> int:
-        return max(
-            0,
-            math.ceil(self.clock_each/50) - 2,
-        )
-
-    @property
-    def shards_total(self) -> int:
-        return self.shards_each * self.n
+        m.Equation(clock_percent_each <= shards_each*50 + 100)
 
     def __str__(self):
-        return f'{self.recipe} ×{self.n}'
+        return self.name
 
-    def distribute(self) -> Tuple['SolvedRecipe', ...]:
-        quo, rem = divmod(self.clock_total, self.n)
-        if not rem:
-            return self,
 
-        y = self.clock_total - quo*self.n
-        x = self.n - y
+class SolutionRecipe:
+    def __init__(self, recipe: Recipe, m):
+        self.recipe = recipe
 
-        return (
-            SolvedRecipe(self.recipe, x, x*quo),
-            SolvedRecipe(self.recipe, y, y*(quo+1)),
+        self.base_instance = base = RecipeInstance(
+            recipe, m,
+            shards_each=m.Var(integer=True, lb=0, ub=3, name=f'{recipe.name} shards each'),
+            clock_percent_each=m.Var(integer=True, lb=0, ub=249, name=f'{recipe.name} clock each'),
+            suffix='base',
+        )
+        self.fract_instance = fract = RecipeInstance(
+            recipe, m,
+            shards_each=base.shards_each,
+            clock_percent_each=base.clock_percent_each + 1,
+            suffix='fract',
         )
 
+        self.clock_total: GK_Operators = base.clock_each + fract.clock_each
+        self.shard_total: GK_Operators = base.shard_total + fract.shard_total
+        self.power_total: GK_Operators = base.power_total + fract.power_total
+        self.building_total: GK_Operators = base.buildings + fract.buildings
+        self.rates_total: Dict[str, GK_Operators] = {
+            resource: base_rate + fract.rates_total[resource]
+            for resource, base_rate in base.rates_total.items()
+        }
 
-@dataclass
-class Solution:
-    recipes: List[SolvedRecipe]
-    rates: Dict[str, float]
+    def __str__(self):
+        return self.recipe.name
 
-    @classmethod
-    def solve(
-        cls,
-        recipes: Dict[str, Recipe],
-        percentages: Dict[str, float],
-        rates: Dict[str, float],
-        minimize: PowerObjective,
-        max_buildings: Optional[int] = None,
-        max_power: Optional[float] = None,
-    ) -> 'Solution':
-        """
-        At this point, we have a total percentage for each recipe, but no choice
-        on allocation of those percentages to a building count, considering
-        nonlinear power load and the addition of power shards.
 
-        For a given maximum building count, there will be an optimal clock
-        scaling configuration, building allocation and power shard allocation
-        that minimizes power consumption.
-        """
-
-        rate_items: Collection[Tuple[Recipe, float]] = [
-            (recipes[recipe], rate)
-            for recipe, rate in percentages.items()
-        ]
-
+class Solver:
+    def __init__(self, recipes: Dict[str, Recipe]):
         # No network; discontinuous problem; respect integer constraints
         APOPT = 1
-        m = GEKKO(remote=False, name='satisfactory_power')
+        m = self.m = GEKKO(remote=False, name='satisfactory_power')
         m.options.solver = APOPT
         m.solver_options = ['minlp_as_nlp 0']
 
-        buildings = [
-            m.Var(integer=True, name=recipe.name, lb=1)
-            for recipe, rate in rate_items
-        ]
-        building_total = sum(buildings)
+        self.recipes: Dict[str, SolutionRecipe] = {
+            name: SolutionRecipe(r, m)
+            for name, r in recipes.items()
+        }
 
-        powers = [
-            build_var**-0.6 * (clock/100)**1.6 * recipe.base_power
-            for build_var, (recipe, clock) in zip(buildings, rate_items)
-        ]
-        power_total = sum(powers)
+        self.shards_total = pure_sum([r.shard_total for r in self.recipes.values()])
+        self.power_total = pure_sum([r.power_total for r in self.recipes.values()])
+        self.building_total = pure_sum([r.building_total for r in self.recipes.values()])
 
-        for (recipe, clock), building in zip(rate_items, buildings):
-            m.Equation(clock/building <= 250)
+        self.rates: Dict[str, GK_Operators] = {}
+        for recipe in self.recipes.values():
+            for resource, rate in recipe.rates_total.items():
+                if resource in self.rates:
+                    self.rates[resource] += rate
+                else:
+                    self.rates[resource] = rate
 
-        limit_strs = []
-        if max_buildings is None:
-            if minimize == PowerObjective.POWER:
-                raise ValueError('Min power requires a building limit')
-        else:
-            m.Equation(building_total <= max_buildings)
-            limit_strs.append(f'{max_buildings} buildings')
+        for rate in self.rates.values():
+            m.Equation(rate >= 0)
 
-        if max_power is not None:
-            m.Equation(power_total <= max_power)
-            limit_strs.append(f'{max_power/1e6:.0f} MW power')
+    def constraints(self, *args: GK_Operators):
+        for arg in args:
+            self.m.Equation(arg)
 
-        if minimize == PowerObjective.BUILDINGS:
-            m.Minimize(building_total)
-        elif minimize == PowerObjective.POWER:
-            m.Minimize(power_total)
-
-        msg = f'Minimizing {minimize.value}'
-        if limit_strs:
-            msg += ' for at most ' + ' and '.join(limit_strs)
-        logger.info(msg)
-
-        m.solve(disp=logger.level <= logging.DEBUG)
-
-        solved = (
-            SolvedRecipe(
-                recipe=recipe,
-                n=int(building.value[0]),
-                clock_total=int(clock),
-            ).distribute()
-            for building, (recipe, clock) in zip(buildings, rate_items)
-        )
-        return cls(
-            recipes=list(chain.from_iterable(solved)),
-            rates=rates,
-        )
-
-    @property
-    def total_buildings(self) -> int:
-        return sum(s.n for s in self.recipes)
-
-    @property
-    def total_power(self) -> float:
-        return sum(s.power_total for s in self.recipes)
-
-    @property
-    def total_shards(self) -> int:
-        return sum(s.shards_total for s in self.recipes)
+    def solve(self):
+        self.m.solve(disp=logger.level <= logging.DEBUG)
 
     def print(self):
+        # todo - broken
         print(
             f'{"Recipe":40} '
             f'{"Clock":5} '
@@ -628,34 +401,23 @@ class Solution:
 
 
 def main():
-    logger.level = logging.INFO
+    logger.level = logging.DEBUG
     logger.addHandler(logging.StreamHandler())
 
     recipes = load_recipes(tier_before=3)
     logger.info(f'{len(recipes)} recipes loaded.')
 
-    logger.info('Linear stage...')
-    problem = setup_linprog(
-        recipes,
-        {
-            'Modular Frame': 100,
-            'Rotor': 100,
-            'Smart Plating': 100,
-        },
+    sol = Solver(recipes)
+    sol.constraints(
+        sol.recipes['Modular Frame'].clock_total >= 1,
+        sol.recipes['Rotor'].clock_total >= 1,
+        sol.recipes['Smart Plating'].clock_total >= 1,
+        sol.building_total <= 50,
+        # sol.power_total <= 100e6,
     )
-    solve_linprog(problem)
-    percentages = dict(get_clocks(problem))
-    rates = dict(get_rates(problem))
-    logger.info(f'{len(percentages)} recipes in solution.')
-
-    logger.info('Nonlinear stage...')
-    soln = Solution.solve(
-        recipes, percentages, rates,
-        minimize=PowerObjective.POWER,
-        max_buildings=50,
-        max_power=100e6,
-    )
-    soln.print()
+    # todo - objective
+    sol.solve()
+    sol.print()
 
 
 if __name__ == '__main__':
