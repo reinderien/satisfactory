@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import ClassVar, Collection, Dict, Iterable, List, Pattern, Union, Sequence
 
 from gekko import GEKKO
-from gekko.gk_operators import GK_Operators
+from gekko.gk_operators import GK_Operators, GK_Intermediate
 from gekko.gk_variable import GKVariable
 from requests import Session
 
@@ -272,7 +272,7 @@ class RecipeInstance:
         recipe: Recipe,
         m: GEKKO,
         shards_each: GKVariable,
-        clock_percent_each: Union[GKVariable, GK_Operators],
+        clock_percent_each: Union[GKVariable, GK_Intermediate],
         suffix: str,
     ):
         self.buildings: GKVariable = m.Var(
@@ -282,18 +282,36 @@ class RecipeInstance:
         self.name = f'{recipe.name} ({suffix})'
 
         self.clock_percent_each = clock_percent_each
-        self.clock_each = clock = clock_percent_each / 100
-        self.shards_each = shards_each
-        self.power_each: GK_Operators = clock**1.6 * recipe.base_power
-        self.shard_total: GK_Operators = shards_each * self.buildings
-        self.power_total: GK_Operators = self.power_each * self.buildings
+        self.clock_each: GK_Intermediate = m.Intermediate(
+            clock_percent_each / 100, name=f'{self.name} clock each',
+        )
+        clock = self.clock_each
+        self.clock_total: GK_Intermediate = m.Intermediate(
+            clock * self.buildings, name=f'{self.name} clock total',
+        )
 
-        self.rates_each: Dict[str, GK_Operators] = {
-            resource: clock * rate
+        self.shards_each = shards_each
+        self.shard_total: GK_Intermediate = m.Intermediate(
+            shards_each * self.buildings, name=f'{self.name} shard total',
+        )
+
+        self.power_each: GK_Intermediate = m.Intermediate(
+            clock**1.6 * recipe.base_power, name=f'{self.name} power each',
+        )
+        self.power_total: GK_Intermediate = m.Intermediate(
+            self.power_each * self.buildings, name=f'{self.name} power total',
+        )
+
+        self.rates_each: Dict[str, GK_Intermediate] = {
+            resource: m.Intermediate(
+                clock * rate, name=f'{self.name} {resource} rate',
+            )
             for resource, rate in recipe.rates.items()
         }
-        self.rates_total: Dict[str, GK_Operators] = {
-            resource: r*self.buildings
+        self.rates_total: Dict[str, GK_Intermediate] = {
+            resource: m.Intermediate(
+                r*self.buildings, name=f'{self.name} {resource} rate total',
+            )
             for resource, r in self.rates_each.items()
         }
 
@@ -310,22 +328,38 @@ class SolutionRecipe:
         self.base_instance = base = RecipeInstance(
             recipe, m,
             shards_each=m.Var(integer=True, lb=0, ub=3, name=f'{recipe.name} shards each'),
-            clock_percent_each=m.Var(integer=True, lb=0, ub=249, name=f'{recipe.name} clock each'),
+            clock_percent_each=m.Var(
+                integer=True, lb=0, ub=249, name=f'{recipe.name} (base) clock percent each',
+            ),
             suffix='base',
         )
         self.fract_instance = fract = RecipeInstance(
             recipe, m,
             shards_each=base.shards_each,
-            clock_percent_each=base.clock_percent_each + 1,
+            clock_percent_each=m.Intermediate(
+                base.clock_percent_each + 1,
+                name=f'{recipe.name} (fract) clock percent each',
+            ),
             suffix='fract',
         )
 
-        self.clock_total: GK_Operators = base.clock_each + fract.clock_each
-        self.shard_total: GK_Operators = base.shard_total + fract.shard_total
-        self.power_total: GK_Operators = base.power_total + fract.power_total
-        self.building_total: GK_Operators = base.buildings + fract.buildings
-        self.rates_total: Dict[str, GK_Operators] = {
-            resource: base_rate + fract.rates_total[resource]
+        self.clock_total: GK_Intermediate = m.Intermediate(
+            base.clock_total + fract.clock_total, name=f'{recipe.name} clock total',
+        )
+        self.shard_total: GK_Intermediate = m.Intermediate(
+            base.shard_total + fract.shard_total, name=f'{recipe.name} shard total',
+        )
+        self.power_total: GK_Intermediate = m.Intermediate(
+            base.power_total + fract.power_total, name=f'{recipe.name} power total',
+        )
+        self.building_total: GK_Intermediate = m.Intermediate(
+            base.buildings + fract.buildings, name=f'{recipe.name} building total',
+        )
+        self.rates_total: Dict[str, GK_Intermediate] = {
+            resource: m.Intermediate(
+                base_rate + fract.rates_total[resource],
+                name=f'{recipe.name} {resource} total',
+            )
             for resource, base_rate in base.rates_total.items()
         }
 
@@ -339,27 +373,61 @@ class Solver:
         APOPT = 1
         m = self.m = GEKKO(remote=False, name='satisfactory_power')
         m.options.solver = APOPT
-        m.solver_options = ['minlp_as_nlp 0']
+        m.solver_options = [
+            'minlp_as_nlp 0',
+            f'minlp_print_level {self.print_level()}',
+        ]
 
         self.recipes: Dict[str, SolutionRecipe] = {
             name: SolutionRecipe(r, m)
             for name, r in recipes.items()
         }
 
-        self.shard_total = pure_sum([r.shard_total for r in self.recipes.values()])
-        self.power_total = pure_sum([r.power_total for r in self.recipes.values()])
-        self.building_total = pure_sum([r.building_total for r in self.recipes.values()])
+        self.shard_total: GK_Intermediate = m.Intermediate(
+            pure_sum([r.shard_total for r in self.recipes.values()]),
+            name='shard total',
+        )
+        self.power_total: GK_Intermediate = m.Intermediate(
+            pure_sum([r.power_total for r in self.recipes.values()]),
+            name='power total',
+        )
+        self.building_total: GK_Intermediate = m.Intermediate(
+            pure_sum([r.building_total for r in self.recipes.values()]),
+            name='building total',
+        )
 
-        self.rates: Dict[str, GK_Operators] = {}
+        rates: Dict[str, GK_Operators] = {}
         for recipe in self.recipes.values():
             for resource, rate in recipe.rates_total.items():
-                if resource in self.rates:
-                    self.rates[resource] += rate
+                if resource in rates:
+                    rates[resource] += rate
                 else:
-                    self.rates[resource] = rate
+                    rates[resource] = rate
+
+        self.rates: Dict[str, GK_Intermediate] = {
+            resource: m.Intermediate(
+                rate, name=f'{resource} rate total',
+            )
+            for resource, rate in rates.items()
+        }
 
         for rate in self.rates.values():
             m.Equation(rate >= 0)
+
+    @staticmethod
+    def print_level() -> int:
+        # This seems to have no effect at all
+        for log, pr in (
+            (logging.DEBUG, 10),
+            (logging.INFO, 7),
+            (logging.WARNING, 4),
+            (logging.ERROR, 2),
+            (logging.CRITICAL, 1),
+        ):
+            if logger.level <= log:
+                return pr
+
+        return 0
 
     def constraints(self, *args: GK_Operators):
         for arg in args:
@@ -369,7 +437,6 @@ class Solver:
         self.m.solve(disp=logger.level <= logging.DEBUG)
 
     def print(self):
-        # todo - broken
         print(
             f'{"Recipe":50} '
             f'{"Clock":5} '
@@ -382,22 +449,25 @@ class Solver:
 
         for r in self.recipes.values():
             for s in (r.base_instance, r.fract_instance):
-                print(
-                    f'{s.name:50} '
-                    f'{s.clock_each.value.value:>5.0f} '
-                    f'{int(s.buildings.value[0]):>2} '
-                    
-                    f'{s.power_each.value/1e6:>6.2f} {s.power_total.value/1e6:>6.2f} '
-                    f'{s.shards_each.value[0]:>6} {s.shard_total.value.value:>3} '
-                    f'{0:>5.1f} {0:>4.1f} '
-                    f'{0:>7}'
-                )
+                buildings = int(s.buildings.value[0])
+                if buildings:
+                    print(
+                        f'{s.name:50} '
+                        f'{s.clock_each[0]:>5.2f} '
+                        f'{buildings:>2.0f} '
+                        
+                        f'{s.power_each.value[0]/1e6:>6.2f} {s.power_total.value[0]/1e6:>6.2f} '
+                        f'{s.shards_each.value[0]:>6.0f} {s.shard_total.value[0]:>3.0f} '
+                        # todo - broken
+                        f'{0:>5.1f} {0:>4.1f} '
+                        f'{0:>7}'
+                    )
 
         print(
             f'{"Total":50} '
-            f'{"":5} {self.building_total.value.value:>2} '
-            f'{"":6} {self.power_total.value.value/1e6:>6.2f} '
-            f'{"":6} {self.shard_total.value.value:>3}'
+            f'{"":5} {self.building_total.value[0]:>2.0f} '
+            f'{"":6} {self.power_total.value[0]/1e6:>6.2f} '
+            f'{"":6} {self.shard_total.value[0]:>3.0f}'
         )
 
 
@@ -410,13 +480,13 @@ def main():
 
     sol = Solver(recipes)
     sol.constraints(
-        sol.recipes['Modular Frame'].clock_total >= 1,
-        sol.recipes['Rotor'].clock_total >= 1,
-        sol.recipes['Smart Plating'].clock_total >= 1,
+        # sol.rates['Modular Frame'] >= 0.01,
+        sol.rates['Rotor'] >= 0.01,
+        # sol.rates['Smart Plating'] >= 0.01,
         sol.building_total <= 50,
-        # sol.power_total <= 100e6,
+        sol.power_total <= 100e6,
     )
-    # todo - objective
+    sol.m.Minimize(sol.building_total)
     sol.solve()
     sol.print()
 
