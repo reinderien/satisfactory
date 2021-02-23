@@ -238,8 +238,22 @@ can't, and GLPK just can't. One convenient solution is
 [APMonitor](https://apmonitor.com), with its Python bindings in
 [Gekko](https://gekko.readthedocs.io). APMonitor is apparently
 pseudo-commercial, being distributed in binary form and requiring a paid license 
-for some features; but the free level worked quite well for me and doesn't even 
-come with nags.
+for some features; but the free level worked* and does not come with any
+intrusive nags, etc.
+
+*I don't like saying this, but... Gekko is terrible. There's a "god class" in a
+file over 2,000 lines long, littered with poor formatting, anti-patterns, no
+whiff of type hinting, and what is in 2021 an inappropriate effort to maintain
+compatibility with Python 2. The exception handling is poorly implemented, the
+way that `subprocess` is used to intercept output prevents real-time updates,
+and there are numerous other annoyances such as class-like case for things that
+are definitely not classes (`Equation`, etc.).
+
+APMonitor itself might (?) not be as bad, but it's fragile and does not deal
+with the entire problem space well. If I skip the linear step and give it all of
+the constraints in one pile, more often than not it will just hang. It can only
+really digest the building-and-power allocation stage of the problem on its own,
+and for that purpose it's fine.
 
 Gekko has a sympy-like symbolic expression language that can directly translate
 Python expressions to constraints and objectives, so it's definitely not as 
