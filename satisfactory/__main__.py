@@ -24,12 +24,13 @@ def main():
 
     logger.info('Power stage...')
     with PowerSolver(
-        recipes, percentages, rates,
+        recipes, percentages, rates, scale_clock=False,
     ) as power:
         power.constraints(
             power.building_total <= 50,
             power.power_total <= 100e6,
         )
+        # power.maximize(power.clock_totals['Rotor'])
         power.minimize(power.power_total)
         power.solve()
         power.print()

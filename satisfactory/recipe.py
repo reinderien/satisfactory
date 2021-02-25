@@ -193,8 +193,8 @@ class Recipe:
                 },
             )
 
-    def secs_per_extra(self, rates: Dict[str, float]) -> str:
-        rate = rates[self.first_output]
+    def secs_per_extra(self, rates: Dict[str, float], clock_scale: float) -> str:
+        rate = rates[self.first_output] * clock_scale
         if rate < 1e-6:
             return '∞'
         return f'{1 / rate:.1f}'

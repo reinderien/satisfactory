@@ -29,11 +29,11 @@ that minimizes power consumption.
 class SolvedRecipe:
     recipe: 'Recipe'
     n: int
-    clock_each: int
+    clock_total: int
 
     @property
-    def clock_total(self) -> int:
-        return self.clock_each * self.n
+    def clock_each(self) -> int:
+        return self.clock_total / self.n
 
     @property
     def power_each(self) -> float:
@@ -72,13 +72,12 @@ class SolvedRecipe:
         if not rem:
             return self,
 
-        y = clock - quo * self.n
-        assert y == rem
-        x = self.n - y
+        x = self.n - rem
+        y = rem
 
         return (
-            SolvedRecipe(self.recipe, n=x, clock_each=quo),
-            SolvedRecipe(self.recipe, n=y, clock_each=quo + 1),
+            SolvedRecipe(self.recipe, n=x, clock_total=x*quo),
+            SolvedRecipe(self.recipe, n=y, clock_total=y*(quo + 1)),
         )
 
 
@@ -88,6 +87,7 @@ class PowerSolver:
         recipes: Dict[str, 'Recipe'],
         percentages: Dict[str, float],
         rates: Dict[str, float],
+        scale_clock: bool = False,
     ):
         recipe_clocks = [
             (recipes[recipe], clock)
@@ -100,9 +100,18 @@ class PowerSolver:
         m.options.solver = APOPT
         m.solver_options = ['minlp_as_nlp 0']
 
+        if scale_clock:
+            logger.warning('Scaling enabled; inexact solution likely')
+            self.clock_scale = m.Var(
+                name='clock_scale', value=1,
+            )
+            m.Equation(self.clock_scale > 0)
+        else:
+            self.clock_scale = m.Const(1, 'scale')
+
         buildings, self.buildings, self.building_total = self.define_buildings(recipe_clocks)
         self.powers, self.power_total = self.define_power(recipe_clocks, buildings)
-        self.clocks = self.define_clocks(recipe_clocks, buildings)
+        self.clocks_each, self.clock_totals = self.define_clocks(recipe_clocks, buildings)
 
         self.solved: List[SolvedRecipe] = []
         self.recipes, self.rates = recipes, rates
@@ -136,7 +145,7 @@ class PowerSolver:
             buildings,
             {
                 recipe.name: building
-                for (recipe, clock), building in zip(recipe_clocks, buildings)
+                for (recipe, _), building in zip(recipe_clocks, buildings)
             },
             self.m.Intermediate(
                 buildings.sum(), name='building_total',
@@ -153,7 +162,7 @@ class PowerSolver:
     ]:
         power_gen = (
             self.m.Intermediate(
-                building**-0.6 * (clock / 100)**1.6 * recipe.base_power,
+                building**-0.6 * (clock * self.clock_scale / 100)**1.6 * recipe.base_power,
                 name=f'{recipe.name} power'
             )
             for building, (recipe, clock) in zip(buildings, recipe_clocks)
@@ -175,24 +184,41 @@ class PowerSolver:
         self,
         recipe_clocks: List[Tuple['Recipe', float]],
         buildings: np.ndarray,
-    ) -> Dict[str, GK_Intermediate]:
+    ) -> Tuple[
+         Dict[str, GK_Intermediate],
+         Dict[str, GK_Intermediate],
+    ]:
+        clock_total_gen = (
+            self.m.Intermediate(
+                clock * self.clock_scale,
+                name=f'{recipe.name} clock total',
+            )
+            for building, (recipe, clock) in zip(buildings, recipe_clocks)
+        )
+        clock_totals: np.ndarray = self.m.Array(clock_total_gen.__next__, len(recipe_clocks))
+
         clock_gen = (
             self.m.Intermediate(
                 clock/building,
                 name=f'{recipe.name} clock each',
             )
-            for building, (recipe, clock) in zip(buildings, recipe_clocks)
+            for building, clock, (recipe, _) in zip(buildings, clock_totals, recipe_clocks)
         )
-
         clocks: np.ndarray = self.m.Array(clock_gen.__next__, len(recipe_clocks))
 
         for clock in clocks:
             self.m.Equation(clock <= 250)
 
-        return {
-            recipe.name: clock
-            for (recipe, _), clock in zip(recipe_clocks, clocks)
-        }
+        return (
+            {
+                recipe.name: clock
+                for (recipe, _), clock in zip(recipe_clocks, clocks)
+            },
+            {
+                recipe.name: clock
+                for (recipe, _), clock in zip(recipe_clocks, clock_totals)
+            },
+        )
 
     def constraints(self, *args: GK_Operators):
         self.m.Equations(args)
@@ -210,7 +236,7 @@ class PowerSolver:
             SolvedRecipe(
                 self.recipes[recipe],
                 round(building.value[0]),
-                self.clocks[recipe].value[0],
+                round(self.clock_totals[recipe].value[0]),
             ).distribute()
             for recipe, building in self.buildings.items()
         )
@@ -220,6 +246,13 @@ class PowerSolver:
     @property
     def total_shards(self) -> int:
         return sum(s.shards_total for s in self.solved)
+
+    @property
+    def clock_scale_value(self) -> float:
+        v = self.clock_scale.value
+        if isinstance(self.clock_scale, GKVariable):
+            return v[0]
+        return v
 
     def print(self):
         print(
@@ -241,7 +274,7 @@ class PowerSolver:
                 f'{s.power_each / 1e6:>6.2f} {s.power_total / 1e6:>6.2f} '
                 f'{s.shards_each:>6} {s.shards_total:>3} '
                 f'{s.secs_per_output_each:>5.1f} {s.secs_per_output_total:>4.1f} '
-                f'{s.recipe.secs_per_extra(self.rates):>7}'
+                f'{s.recipe.secs_per_extra(self.rates, self.clock_scale_value):>7}'
             )
 
         print(
