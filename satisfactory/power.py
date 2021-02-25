@@ -1,34 +1,39 @@
-import enum
 import logging
 import math
 from dataclasses import dataclass
-from enum import Enum
 from itertools import chain
-from typing import Collection, Dict, List, Tuple, Optional, TYPE_CHECKING
+from typing import Dict, List, Tuple, TYPE_CHECKING
 
+import numpy as np
 from gekko import GEKKO
+from gekko.gk_operators import GK_Intermediate, GK_Operators
+from gekko.gk_variable import GKVariable
 
 from .logs import logger
 
 if TYPE_CHECKING:
     from .recipe import Recipe
 
+"""
+At this point, we have a total percentage for each recipe, but no choice
+on allocation of those percentages to a building count, considering
+nonlinear power load and the addition of power shards.
 
-@enum.unique
-class PowerObjective(Enum):
-    POWER = 'power'
-    BUILDINGS = 'buildings'
+For a given maximum building count, there will be an optimal clock
+scaling configuration, building allocation and power shard allocation
+that minimizes power consumption.
+"""
 
 
 @dataclass
 class SolvedRecipe:
     recipe: 'Recipe'
     n: int
-    clock_total: int
+    clock_each: int
 
     @property
-    def clock_each(self) -> float:
-        return self.clock_total / self.n
+    def clock_total(self) -> int:
+        return self.clock_each * self.n
 
     @property
     def power_each(self) -> float:
@@ -62,118 +67,159 @@ class SolvedRecipe:
         return f'{self.recipe} ×{self.n}'
 
     def distribute(self) -> Tuple['SolvedRecipe', ...]:
-        quo, rem = divmod(self.clock_total, self.n)
+        clock = round(self.clock_total)
+        quo, rem = divmod(clock, self.n)
         if not rem:
             return self,
 
-        y = self.clock_total - quo * self.n
+        y = clock - quo * self.n
+        assert y == rem
         x = self.n - y
 
         return (
-            SolvedRecipe(self.recipe, x, x * quo),
-            SolvedRecipe(self.recipe, y, y * (quo + 1)),
+            SolvedRecipe(self.recipe, n=x, clock_each=quo),
+            SolvedRecipe(self.recipe, n=y, clock_each=quo + 1),
         )
 
 
-@dataclass
-class Solution:
-    recipes: List[SolvedRecipe]
-    rates: Dict[str, float]
-
-    @classmethod
-    def solve(
-            cls,
-            recipes: Dict[str, 'Recipe'],
-            percentages: Dict[str, float],
-            rates: Dict[str, float],
-            minimize: PowerObjective,
-            max_buildings: Optional[int] = None,
-            max_power: Optional[float] = None,
-    ) -> 'Solution':
-        """
-        At this point, we have a total percentage for each recipe, but no choice
-        on allocation of those percentages to a building count, considering
-        nonlinear power load and the addition of power shards.
-
-        For a given maximum building count, there will be an optimal clock
-        scaling configuration, building allocation and power shard allocation
-        that minimizes power consumption.
-        """
-
-        rate_items: Collection[Tuple['Recipe', float]] = [
-            (recipes[recipe], rate)
-            for recipe, rate in percentages.items()
+class PowerSolver:
+    def __init__(
+        self,
+        recipes: Dict[str, 'Recipe'],
+        percentages: Dict[str, float],
+        rates: Dict[str, float],
+    ):
+        recipe_clocks = [
+            (recipes[recipe], clock)
+            for recipe, clock in percentages.items()
         ]
 
         # No network; discontinuous problem; respect integer constraints
         APOPT = 1
-        m = GEKKO(remote=False, name='satisfactory_power')
+        self.m = m = GEKKO(remote=False, name='satisfactory_power')
         m.options.solver = APOPT
         m.solver_options = ['minlp_as_nlp 0']
 
-        buildings = [
-            m.Var(integer=True, name=recipe.name, lb=1)
-            for recipe, rate in rate_items
-        ]
-        building_total = sum(buildings)
+        buildings, self.buildings, self.building_total = self.define_buildings(recipe_clocks)
+        self.powers, self.power_total = self.define_power(recipe_clocks, buildings)
+        self.clocks = self.define_clocks(recipe_clocks, buildings)
 
-        powers = [
-            build_var ** -0.6 * (clock / 100) ** 1.6 * recipe.base_power
-            for build_var, (recipe, clock) in zip(buildings, rate_items)
-        ]
-        power_total = sum(powers)
+        self.solved: List[SolvedRecipe] = []
+        self.recipes, self.rates = recipes, rates
 
-        for (recipe, clock), building in zip(rate_items, buildings):
-            m.Equation(clock / building <= 250)
+    def __enter__(self):
+        return self
 
-        limit_strs = []
-        if max_buildings is None:
-            if minimize == PowerObjective.POWER:
-                raise ValueError('Min power requires a building limit')
-        else:
-            m.Equation(building_total <= max_buildings)
-            limit_strs.append(f'{max_buildings} buildings')
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.m.cleanup()
 
-        if max_power is not None:
-            m.Equation(power_total <= max_power)
-            limit_strs.append(f'{max_power / 1e6:.0f} MW power')
+    def define_buildings(self, recipe_clocks: List[Tuple['Recipe', float]]) -> Tuple[
+        np.ndarray,
+        Dict[str, GKVariable],
+        GK_Intermediate,
+    ]:
+        building_gen = (
+            self.m.Var(
+                name=f'{recipe.name} buildings',
+                integer=True,
+                lb=1,
+                value=max(1, clock//100),
+            )
+            for recipe, clock in recipe_clocks
+        )
 
-        if minimize == PowerObjective.BUILDINGS:
-            m.Minimize(building_total)
-        elif minimize == PowerObjective.POWER:
-            m.Minimize(power_total)
+        # There doesn't seem to be much point in making an Array, since it still
+        # translates to individual variables for APM, but whatever
+        buildings = self.m.Array(building_gen.__next__, len(recipe_clocks))
 
-        msg = f'Minimizing {minimize.value}'
-        if limit_strs:
-            msg += ' for at most ' + ' and '.join(limit_strs)
-        logger.info(msg)
+        return (
+            buildings,
+            {
+                recipe.name: building
+                for (recipe, clock), building in zip(recipe_clocks, buildings)
+            },
+            self.m.Intermediate(
+                buildings.sum(), name='building_total',
+            )
+        )
 
-        m.solve(disp=logger.level <= logging.DEBUG)
+    def define_power(
+        self,
+        recipe_clocks: List[Tuple['Recipe', float]],
+        buildings: np.ndarray,
+    ) -> Tuple[
+        Dict[str, GK_Intermediate],
+        GK_Intermediate,
+    ]:
+        power_gen = (
+            self.m.Intermediate(
+                building**-0.6 * (clock / 100)**1.6 * recipe.base_power,
+                name=f'{recipe.name} power'
+            )
+            for building, (recipe, clock) in zip(buildings, recipe_clocks)
+        )
+
+        powers = self.m.Array(power_gen.__next__, len(recipe_clocks))
+
+        return (
+            {
+                recipe.name: power
+                for (recipe, _), power in zip(recipe_clocks, powers)
+            },
+            self.m.Intermediate(
+                powers.sum(), name=f'power_total',
+            ),
+        )
+
+    def define_clocks(
+        self,
+        recipe_clocks: List[Tuple['Recipe', float]],
+        buildings: np.ndarray,
+    ) -> Dict[str, GK_Intermediate]:
+        clock_gen = (
+            self.m.Intermediate(
+                clock/building,
+                name=f'{recipe.name} clock each',
+            )
+            for building, (recipe, clock) in zip(buildings, recipe_clocks)
+        )
+
+        clocks: np.ndarray = self.m.Array(clock_gen.__next__, len(recipe_clocks))
+
+        for clock in clocks:
+            self.m.Equation(clock <= 250)
+
+        return {
+            recipe.name: clock
+            for (recipe, _), clock in zip(recipe_clocks, clocks)
+        }
+
+    def constraints(self, *args: GK_Operators):
+        self.m.Equations(args)
+
+    def maximize(self, expr: GK_Operators):
+        self.m.Maximize(expr)
+
+    def minimize(self, expr: GK_Operators):
+        self.m.Minimize(expr)
+
+    def solve(self):
+        self.m.solve(disp=logger.level <= logging.DEBUG)
 
         solved = (
             SolvedRecipe(
-                recipe=recipe,
-                n=int(building.value[0]),
-                clock_total=int(clock),
+                self.recipes[recipe],
+                round(building.value[0]),
+                self.clocks[recipe].value[0],
             ).distribute()
-            for building, (recipe, clock) in zip(buildings, rate_items)
-        )
-        return cls(
-            recipes=list(chain.from_iterable(solved)),
-            rates=rates,
+            for recipe, building in self.buildings.items()
         )
 
-    @property
-    def total_buildings(self) -> int:
-        return sum(s.n for s in self.recipes)
-
-    @property
-    def total_power(self) -> float:
-        return sum(s.power_total for s in self.recipes)
+        self.solved.extend(chain.from_iterable(solved))
 
     @property
     def total_shards(self) -> int:
-        return sum(s.shards_total for s in self.recipes)
+        return sum(s.shards_total for s in self.solved)
 
     def print(self):
         print(
@@ -186,7 +232,7 @@ class Solution:
             f'{"s/out":>5} {"tot":>4} {"s/extra":>7}'
         )
 
-        for s in self.recipes:
+        for s in self.solved:
             print(
                 f'{s.recipe.name:40} '
                 f'{s.clock_each:>5.0f} '
@@ -200,7 +246,7 @@ class Solution:
 
         print(
             f'{"Total":40} '
-            f'{"":5} {self.total_buildings:>2} '
-            f'{"":6} {self.total_power / 1e6:>6.2f} '
+            f'{"":5} {round(self.building_total.value[0]):>2} '
+            f'{"":6} {self.power_total.value[0] / 1e6:>6.2f} '
             f'{"":6} {self.total_shards:>3}'
         )

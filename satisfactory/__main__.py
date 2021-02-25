@@ -1,5 +1,5 @@
 from .logs import logger
-from .power import Solution, PowerObjective
+from .power import PowerSolver
 from .rates import setup_linprog, solve_linprog, get_clocks, get_rates
 from .recipe import load_recipes
 
@@ -23,13 +23,16 @@ def main():
     logger.info(f'{len(percentages)} recipes in solution.')
 
     logger.info('Power stage...')
-    soln = Solution.solve(
+    with PowerSolver(
         recipes, percentages, rates,
-        minimize=PowerObjective.POWER,
-        max_buildings=50,
-        max_power=100e6,
-    )
-    soln.print()
+    ) as power:
+        power.constraints(
+            power.building_total <= 50,
+            power.power_total <= 100e6,
+        )
+        power.minimize(power.power_total)
+        power.solve()
+        power.print()
 
 
 main()
