@@ -2,7 +2,7 @@ import logging
 import math
 from dataclasses import dataclass
 from itertools import chain
-from typing import Dict, List, Tuple, TYPE_CHECKING
+from typing import Dict, List, Tuple, TYPE_CHECKING, Iterable
 
 import numpy as np
 from gekko import GEKKO
@@ -25,6 +25,9 @@ that minimizes power consumption.
 """
 
 
+APOPT = 1
+
+
 @dataclass
 class SolvedRecipe:
     recipe: 'Recipe'
@@ -33,7 +36,7 @@ class SolvedRecipe:
 
     @property
     def clock_each(self) -> int:
-        return self.clock_total / self.n
+        return self.clock_total // self.n
 
     @property
     def power_each(self) -> float:
@@ -95,7 +98,6 @@ class PowerSolver:
         ]
 
         # No network; discontinuous problem; respect integer constraints
-        APOPT = 1
         self.m = m = GEKKO(remote=False, name='satisfactory_power')
         m.options.solver = APOPT
         m.solver_options = ['minlp_as_nlp 0']
@@ -112,6 +114,7 @@ class PowerSolver:
         buildings, self.buildings, self.building_total = self.define_buildings(recipe_clocks)
         self.powers, self.power_total = self.define_power(recipe_clocks, buildings)
         self.clocks_each, self.clock_totals = self.define_clocks(recipe_clocks, buildings)
+        self.shards_each, self.shard_totals, self.shards_total = self.define_shards()
 
         self.solved: List[SolvedRecipe] = []
         self.recipes, self.rates = recipes, rates
@@ -137,6 +140,7 @@ class PowerSolver:
             for recipe, clock in recipe_clocks
         )
 
+        # todo:
         # There doesn't seem to be much point in making an Array, since it still
         # translates to individual variables for APM, but whatever
         buildings = self.m.Array(building_gen.__next__, len(recipe_clocks))
@@ -185,8 +189,8 @@ class PowerSolver:
         recipe_clocks: List[Tuple['Recipe', float]],
         buildings: np.ndarray,
     ) -> Tuple[
-         Dict[str, GK_Intermediate],
-         Dict[str, GK_Intermediate],
+        Dict[str, GK_Intermediate],
+        Dict[str, GK_Intermediate],
     ]:
         clock_total_gen = (
             self.m.Intermediate(
@@ -218,6 +222,46 @@ class PowerSolver:
                 recipe.name: clock
                 for (recipe, _), clock in zip(recipe_clocks, clock_totals)
             },
+        )
+
+    def define_shards(self) -> Tuple[
+        Dict[str, GKVariable],
+        Dict[str, GK_Intermediate],
+        GK_Intermediate,
+    ]:
+        shards_each = {}
+        shards_total = {}
+        total = None
+
+        x_data, y_data = [0, 100], [0, 0]
+        for y in range(1, 4):
+            x_data.extend((
+                50*(y + 1) + 1,
+                50*(y + 2),
+            ))
+            y_data.extend((y, y))
+
+        for recipe, clock in self.clocks_each.items():
+            x = self.m.Var(name=f'{recipe} shard clock')
+            y = self.m.Var(name=f'{recipe} shards each')
+            self.m.Equation(x == clock)
+            self.m.pwl(x, y, x_data, y_data)
+            shards_each[recipe] = y
+            addend = self.m.Intermediate(
+                y*self.buildings[recipe],
+                name=f'{recipe} shards total',
+            )
+            shards_total[recipe] = addend
+            if total is None:
+                total = addend
+            else:
+                total += addend
+
+        return (
+            shards_each, shards_total,
+            self.m.Intermediate(
+                total, name='shards_total',
+            ),
         )
 
     def constraints(self, *args: GK_Operators):
