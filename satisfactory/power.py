@@ -254,6 +254,10 @@ class PowerSolver:
             return v[0]
         return v
 
+    @property
+    def actual_power(self) -> float:
+        return sum(s.power_total for s in self.solved)
+
     def print(self):
         print(
             f'{"Recipe":40} '
@@ -278,8 +282,13 @@ class PowerSolver:
             )
 
         print(
-            f'{"Total":40} '
-            f'{"":5} {round(self.building_total.value[0]):>2} '
+            f'{"Total approx":40} '
+            f'{"":5} {"":>2} '
             f'{"":6} {self.power_total.value[0] / 1e6:>6.2f} '
+            f'{"":6} {"":>3}\n'
+            
+            f'{"Total actual":40} '
+            f'{"":5} {round(self.building_total.value[0]):>2} '
+            f'{"":6} {self.actual_power / 1e6:>6.2f} '
             f'{"":6} {self.total_shards:>3}'
         )
