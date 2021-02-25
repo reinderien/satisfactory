@@ -25,6 +25,9 @@ that minimizes power consumption.
 """
 
 
+APOPT = 1
+
+
 @dataclass
 class SolvedRecipe:
     recipe: 'Recipe'
@@ -33,7 +36,7 @@ class SolvedRecipe:
 
     @property
     def clock_each(self) -> int:
-        return self.clock_total / self.n
+        return self.clock_total // self.n
 
     @property
     def power_each(self) -> float:
@@ -95,7 +98,6 @@ class PowerSolver:
         ]
 
         # No network; discontinuous problem; respect integer constraints
-        APOPT = 1
         self.m = m = GEKKO(remote=False, name='satisfactory_power')
         m.options.solver = APOPT
         m.solver_options = ['minlp_as_nlp 0']
@@ -137,6 +139,7 @@ class PowerSolver:
             for recipe, clock in recipe_clocks
         )
 
+        # todo:
         # There doesn't seem to be much point in making an Array, since it still
         # translates to individual variables for APM, but whatever
         buildings = self.m.Array(building_gen.__next__, len(recipe_clocks))
@@ -185,8 +188,8 @@ class PowerSolver:
         recipe_clocks: List[Tuple['Recipe', float]],
         buildings: np.ndarray,
     ) -> Tuple[
-         Dict[str, GK_Intermediate],
-         Dict[str, GK_Intermediate],
+        Dict[str, GK_Intermediate],
+        Dict[str, GK_Intermediate],
     ]:
         clock_total_gen = (
             self.m.Intermediate(
