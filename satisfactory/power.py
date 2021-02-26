@@ -2,9 +2,9 @@ import logging
 import math
 from dataclasses import dataclass
 from itertools import chain
-from typing import Dict, List, Tuple, TYPE_CHECKING
+from numbers import Number
+from typing import Dict, Iterable, List, Tuple, TYPE_CHECKING
 
-import numpy as np
 from gekko import GEKKO
 from gekko.gk_operators import GK_Intermediate, GK_Operators
 from gekko.gk_variable import GKVariable
@@ -84,6 +84,14 @@ class SolvedRecipe:
         )
 
 
+def pure_sum(series: Iterable[Number]) -> Number:
+    series = iter(series)
+    total = next(series)
+    for x in series:
+        total += x
+    return total
+
+
 class PowerSolver:
     def __init__(
         self,
@@ -92,6 +100,9 @@ class PowerSolver:
         rates: Dict[str, float],
         scale_clock: bool = False,
     ):
+        self.solved: List[SolvedRecipe] = []
+        self.recipes, self.rates = recipes, rates
+
         recipe_clocks = [
             (recipes[recipe], clock)
             for recipe, clock in percentages.items()
@@ -111,12 +122,9 @@ class PowerSolver:
         else:
             self.clock_scale = m.Const(1, 'scale')
 
-        buildings, self.buildings, self.building_total = self.define_buildings(recipe_clocks)
-        self.powers, self.power_total = self.define_power(recipe_clocks, buildings)
-        self.clocks_each, self.clock_totals = self.define_clocks(recipe_clocks, buildings)
-
-        self.solved: List[SolvedRecipe] = []
-        self.recipes, self.rates = recipes, rates
+        self.buildings, self.building_total = self.define_buildings(recipe_clocks)
+        self.powers, self.power_total = self.define_power(recipe_clocks)
+        self.clocks_each, self.clock_totals = self.define_clocks(recipe_clocks)
 
     def __enter__(self):
         return self
@@ -125,11 +133,10 @@ class PowerSolver:
         self.m.cleanup()
 
     def define_buildings(self, recipe_clocks: List[Tuple['Recipe', float]]) -> Tuple[
-        np.ndarray,
         Dict[str, GKVariable],
         GK_Intermediate,
     ]:
-        building_gen = (
+        buildings = [
             self.m.Var(
                 name=f'{recipe.name} buildings',
                 integer=True,
@@ -137,41 +144,34 @@ class PowerSolver:
                 value=max(1, clock//100),
             )
             for recipe, clock in recipe_clocks
-        )
-
-        # todo:
-        # There doesn't seem to be much point in making an Array, since it still
-        # translates to individual variables for APM, but whatever
-        buildings = self.m.Array(building_gen.__next__, len(recipe_clocks))
+        ]
 
         return (
-            buildings,
             {
                 recipe.name: building
                 for (recipe, _), building in zip(recipe_clocks, buildings)
             },
             self.m.Intermediate(
-                buildings.sum(), name='building_total',
+                pure_sum(buildings), name='building_total',
             )
         )
 
     def define_power(
         self,
         recipe_clocks: List[Tuple['Recipe', float]],
-        buildings: np.ndarray,
     ) -> Tuple[
         Dict[str, GK_Intermediate],
         GK_Intermediate,
     ]:
-        power_gen = (
+        powers = [
             self.m.Intermediate(
-                building**-0.6 * (clock * self.clock_scale / 100)**1.6 * recipe.base_power,
+                self.buildings[recipe.name]**-0.6
+                * (clock * self.clock_scale / 100)**1.6
+                * recipe.base_power,
                 name=f'{recipe.name} power'
             )
-            for building, (recipe, clock) in zip(buildings, recipe_clocks)
-        )
-
-        powers = self.m.Array(power_gen.__next__, len(recipe_clocks))
+            for recipe, clock in recipe_clocks
+        ]
 
         return (
             {
@@ -179,35 +179,32 @@ class PowerSolver:
                 for (recipe, _), power in zip(recipe_clocks, powers)
             },
             self.m.Intermediate(
-                powers.sum(), name=f'power_total',
+                pure_sum(powers), name=f'power_total',
             ),
         )
 
     def define_clocks(
         self,
         recipe_clocks: List[Tuple['Recipe', float]],
-        buildings: np.ndarray,
     ) -> Tuple[
         Dict[str, GK_Intermediate],
         Dict[str, GK_Intermediate],
     ]:
-        clock_total_gen = (
+        clock_totals = [
             self.m.Intermediate(
                 clock * self.clock_scale,
                 name=f'{recipe.name} clock total',
             )
-            for building, (recipe, clock) in zip(buildings, recipe_clocks)
-        )
-        clock_totals: np.ndarray = self.m.Array(clock_total_gen.__next__, len(recipe_clocks))
+            for recipe, clock in recipe_clocks
+        ]
 
-        clock_gen = (
+        clocks = [
             self.m.Intermediate(
-                clock/building,
+                clock / self.buildings[recipe.name],
                 name=f'{recipe.name} clock each',
             )
-            for building, clock, (recipe, _) in zip(buildings, clock_totals, recipe_clocks)
-        )
-        clocks: np.ndarray = self.m.Array(clock_gen.__next__, len(recipe_clocks))
+            for clock, (recipe, _) in zip(clock_totals, recipe_clocks)
+        ]
 
         for clock in clocks:
             self.m.Equation(clock <= 250)
