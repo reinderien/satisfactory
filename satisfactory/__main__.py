@@ -11,7 +11,7 @@ def main():
     logger.info('Rate-pinning stage...')
     problem = setup_linprog(
         recipes,
-        {
+        fixed_clocks={
             'Modular Frame': 100,
             'Rotor': 100,
             'Smart Plating': 100,

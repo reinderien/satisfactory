@@ -1,7 +1,7 @@
 import logging
 import os
 from tempfile import NamedTemporaryFile
-from typing import Dict, Iterable, Tuple, TYPE_CHECKING, TypeVar
+from typing import Dict, Iterable, Tuple, TYPE_CHECKING, TypeVar, Optional
 
 import swiglpk as lp
 
@@ -41,21 +41,27 @@ A variable is called non-basic if it has an active bound; otherwise it is
 called basic.
 
 For us:
-- structural variables are all integers, one percent of each recipe instance
+- structural variables are all integers, one percent of each recipe instance -
+  the sum of all of these will be minimized
 - auxiliary variables are individual resource rates (also scaled by 0.01)
 - no resource rate may be below zero or the solution will be unsustainable
 - selected recipes will be fixed to a desired output percentage
 """
 
 
-def setup_row(problem: SwigPyObject, i: int, resource: str):
+def setup_row(
+    problem: SwigPyObject,
+    i: int,
+    resource: str,
+    min_rate: float,
+):
     lp.glp_set_row_name(problem, i, resource)
 
     # Every resource rate must be 0 or greater for sustainability
     lp.glp_set_row_bnds(
         problem, i,
         lp.GLP_LO,
-        0, float('inf'),  # Lower and upper boundaries
+        100*min_rate, float('inf'),  # Lower and upper boundaries
     )
 
 
@@ -63,8 +69,9 @@ def setup_col(
     problem: SwigPyObject,
     j: int,
     recipe: 'Recipe',
-    fixed_recipe_percentages: Dict[str, int],
-    resource_indices: Dict[str, int]
+    resource_indices: Dict[str, int],
+    min_clock: Optional[int] = None,
+    fixed_clock: Optional[int] = None,
 ):
     lp.glp_set_col_name(problem, j, recipe.name)
 
@@ -75,20 +82,19 @@ def setup_col(
     # All recipes are currently weighed the same
     lp.glp_set_obj_coef(problem, j, 1)
 
-    fixed = fixed_recipe_percentages.get(recipe.name)
-    if fixed is None:
+    if fixed_clock is None:
         # All recipes must have at least 0 instances
         lp.glp_set_col_bnds(
             problem, j,
             lp.GLP_LO,
-            0, float('inf'),  # Lower and upper boundaries
+            min_clock or 0, float('inf'),  # Lower and upper boundaries
         )
     else:
         # Set our desired (fixed) outputs
         lp.glp_set_col_bnds(
             problem, j,
             lp.GLP_FX,
-            fixed, fixed,  # Boundaries are equal (variable is fixed)
+            fixed_clock, fixed_clock,  # Boundaries are equal (variable is fixed)
         )
 
     # The constraint coefficients are just the recipe rates
@@ -103,8 +109,17 @@ def setup_col(
 
 def setup_linprog(
     recipes: Dict[str, 'Recipe'],
-    fixed_recipe_percentages: Dict[str, int],
+    min_rates: Optional[Dict[str, float]] = None,
+    min_clocks: Optional[Dict[str, int]] = None,
+    fixed_clocks: Optional[Dict[str, int]] = None,
 ) -> SwigPyObject:
+    if min_rates is None:
+        min_rates = {}
+    if min_clocks is None:
+        min_clocks = {}
+    if fixed_clocks is None:
+        fixed_clocks = {}
+
     resources = sorted({p for r in recipes.values() for p in r.rates.keys()})
     resource_indices: Dict[str, int] = {
         r: i
@@ -121,10 +136,13 @@ def setup_linprog(
     lp.glp_add_cols(problem, n)
 
     for i, resource in enumerate(resources, 1):
-        setup_row(problem, i, resource)
+        setup_row(problem, i, resource, min_rates.get(resource, 0))
 
     for j, recipe in enumerate(recipes.values(), 1):
-        setup_col(problem, j, recipe, fixed_recipe_percentages, resource_indices)
+        setup_col(
+            problem, j, recipe, resource_indices,
+            min_clocks.get(recipe.name), fixed_clocks.get(recipe.name),
+        )
 
     lp.glp_create_index(problem)
 
