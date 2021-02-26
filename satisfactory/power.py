@@ -125,6 +125,7 @@ class PowerSolver:
         self.buildings, self.building_total = self.define_buildings(recipe_clocks)
         self.powers, self.power_total = self.define_power(recipe_clocks)
         self.clocks_each, self.clock_totals = self.define_clocks(recipe_clocks)
+        self.shards_each, self.shard_totals, self.shard_total = self.define_shards()
 
     def __enter__(self):
         return self
@@ -220,6 +221,51 @@ class PowerSolver:
             },
         )
 
+    def define_shards(self) -> Tuple[
+        Dict[str, GKVariable],
+        Dict[str, GK_Intermediate],
+        GK_Intermediate,
+    ]:
+        shards_each = {}
+        shards_total = {}
+
+        zero = self.m.Var(name='zero', integer=True)
+        self.m.Equation(zero == 0)
+
+        for recipe, clock in self.clocks_each.items():
+            # e.g.
+            # max(0, 120/50 - 2) = 0.4
+            # 0.4 <= 1 < 1.4
+            # max(0, 100/50 - 2) = 0
+            # 0 <= 0 < 1
+            shards_cont = self.m.Var(name=f'{recipe} shards cont')
+            shards_pos = self.m.max2(zero, shards_cont)
+            shards = shards_each[recipe] = self.m.Var(
+                name=f'{recipe} shards each',
+                integer=True,
+            )
+            shards_total[recipe] = self.m.Intermediate(
+                name=f'{recipe} shards total',
+                equation=shards * self.buildings[recipe],
+            )
+
+            # 100 corresponds to 0, so 100.5 corresponds to 0.01
+            # This 0.5 offset is between two integer percentage points so there
+            # will be no boundary problems
+            self.m.Equations((
+                shards_cont == clock / 50 - 2,
+                shards_pos - 0.01 <= shards,
+                shards < shards_pos + 0.99,
+            ))
+
+        return (
+            shards_each,
+            shards_total,
+            self.m.Intermediate(
+                pure_sum(shards_total.values()), name=f'shard_total',
+            )
+        )
+
     def constraints(self, *args: GK_Operators):
         self.m.Equations(args)
 
@@ -244,10 +290,6 @@ class PowerSolver:
         self.solved.extend(chain.from_iterable(solved))
 
     @property
-    def total_shards(self) -> int:
-        return sum(s.shards_total for s in self.solved)
-
-    @property
     def clock_scale_value(self) -> float:
         v = self.clock_scale.value
         if isinstance(self.clock_scale, GKVariable):
@@ -257,6 +299,10 @@ class PowerSolver:
     @property
     def actual_power(self) -> float:
         return sum(s.power_total for s in self.solved)
+
+    @property
+    def actual_shards(self) -> int:
+        return sum(s.shards_total for s in self.solved)
 
     def print(self):
         print(
@@ -285,10 +331,10 @@ class PowerSolver:
             f'{"Total approx":40} '
             f'{"":5} {"":>2} '
             f'{"":6} {self.power_total.value[0] / 1e6:>6.2f} '
-            f'{"":6} {"":>3}\n'
+            f'{"":6} {self.shard_total.value[0]:>3.0f}\n'
             
             f'{"Total actual":40} '
             f'{"":5} {round(self.building_total.value[0]):>2} '
             f'{"":6} {self.actual_power / 1e6:>6.2f} '
-            f'{"":6} {self.total_shards:>3}'
+            f'{"":6} {self.actual_shards:>3}'
         )

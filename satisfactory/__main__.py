@@ -28,10 +28,11 @@ def main():
     ) as power:
         power.constraints(
             power.building_total <= 50,
-            power.power_total <= 100e6,
+            power.power_total <= 200e6,
+            power.shard_total <= 20,
         )
         # power.maximize(power.clock_totals['Rotor'])
-        power.minimize(power.power_total)
+        power.minimize(power.building_total)
         power.solve()
         power.print()
 
