@@ -216,8 +216,12 @@ def get_rates(problem: SwigPyObject) -> Iterable[Tuple[str, float]]:
 
 
 def get_clocks(problem: SwigPyObject) -> Iterable[Tuple[str, float]]:
+    n_recipes = 0
     for j in range(1, 1 + lp.glp_get_num_cols(problem)):
         clock = lp.glp_mip_col_val(problem, j)
         if clock:
             name = lp.glp_get_col_name(problem, j)
             yield name, clock
+            n_recipes += 1
+
+    logger.info(f'{n_recipes} recipes in rate solution.')

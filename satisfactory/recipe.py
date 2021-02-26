@@ -250,4 +250,5 @@ def load_recipes(tier_before: int) -> Dict[str, Recipe]:
     recipes = get_recipes(tier_before)
     with fn.open('wb') as f:
         pickle.dump(recipes, f)
+    logger.info(f'{len(recipes)} recipes loaded.')
     return recipes
