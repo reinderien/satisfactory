@@ -111,7 +111,11 @@ class PowerSolver:
         # No network; discontinuous problem; respect integer constraints
         self.m = m = GEKKO(remote=False, name='satisfactory_power')
         m.options.solver = APOPT
-        m.solver_options = ['minlp_as_nlp 0']
+        m.solver_options = [
+            'minlp_as_nlp 0',
+            'minlp_gap_tol 1e-3',
+            'minlp_integer_tol 1e-3',
+        ]
 
         if scale_clock:
             logger.warning('Scaling enabled; inexact solution likely')
@@ -229,8 +233,10 @@ class PowerSolver:
         shards_each = {}
         shards_total = {}
 
-        zero = self.m.Var(name='zero', integer=True)
-        self.m.Equation(zero == 0)
+        zero = self.m.Param(name='zero', value=0)
+
+        # todo - this needs to die
+        self.shard_residuals = {}
 
         for recipe, clock in self.clocks_each.items():
             # e.g.
@@ -240,6 +246,8 @@ class PowerSolver:
             # 0 <= 0 < 1
             shards_cont = self.m.Var(name=f'{recipe} shards cont')
             shards_pos = self.m.max2(zero, shards_cont)
+            self.shard_residuals[recipe] = shards_cont, shards_pos
+
             shards = shards_each[recipe] = self.m.Var(
                 name=f'{recipe} shards each',
                 integer=True,
@@ -252,9 +260,13 @@ class PowerSolver:
             # 100 corresponds to 0, so 100.5 corresponds to 0.01
             # This 0.5 offset is between two integer percentage points so there
             # will be no boundary problems
+            # todo - sometimes this fails and the output of max2(), rather than
+            # being 0, is actually 1 - 0.99 = 0.01; and
+            # 1 < 0.01 + 0.99 is deemed true
             self.m.Equations((
                 shards_cont == clock / 50 - 2,
                 shards_pos - 0.01 <= shards,
+                # 1 < 0.01 + 0.99
                 shards < shards_pos + 0.99,
             ))
 
@@ -277,6 +289,17 @@ class PowerSolver:
 
     def solve(self):
         self.m.solve(disp=logger.level <= logging.DEBUG)
+
+        # todo: fixme - this should not be necessary
+        for recipe, (cont, pos) in self.shard_residuals.items():
+            cont = cont[0]
+            pos = pos[0]
+            if cont < 0 and pos > 0.005:
+                logger.error(
+                    f'The shard solution for "{recipe}" is wrong: '
+                    f'max(0, {cont:.3f}) = {pos:.3f} which produces an '
+                    f'incorrect shard count of {self.shards_each[recipe][0]}'
+                )
 
         solved = (
             SolvedRecipe(

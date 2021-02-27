@@ -25,7 +25,7 @@ def hungry_plating():
 
 def fast_rotors():
     print('Factory to produce as many rotors as possible, limited by power and '
-          'building count, via approximate scaling')
+          'building count, via two-stage approximate scaling')
     recipes = load_recipes(tier_before=3)
     problem = setup_linprog(recipes,
                             fixed_clocks={'Rotor': 100})
@@ -34,9 +34,26 @@ def fast_rotors():
     with PowerSolver(recipes,
                      percentages=dict(get_clocks(problem)),
                      rates=dict(get_rates(problem)),
-                     scale_clock=True) as power:
-        power.constraints(power.building_total <= 50,
-                          power.power_total <= 100e6)
-        power.maximize(power.clock_totals['Rotor'])
-        power.solve()
-        power.print()
+                     scale_clock=True) as approx:
+        approx.constraints(approx.building_total <= 50,
+                           approx.power_total <= 100e6)
+        approx.maximize(approx.clock_totals['Rotor'])
+        approx.solve()
+        approx.print()
+
+    print('\nRefined:')
+    problem = setup_linprog(
+        recipes,
+        fixed_clocks={
+            'Rotor': round(approx.clock_totals['Rotor'][0]),
+        }
+    )
+    solve_linprog(problem)
+
+    with PowerSolver(recipes,
+                     percentages=dict(get_clocks(problem)),
+                     rates=dict(get_rates(problem))) as exact:
+        exact.constraints(exact.building_total <= 50)
+        exact.minimize(exact.power_total)
+        exact.solve()
+        exact.print()
