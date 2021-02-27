@@ -264,7 +264,7 @@ class PowerSolver:
             # being 0, is actually 1 - 0.99 = 0.01; and
             # 1 < 0.01 + 0.99 is deemed true
             self.m.Equations((
-                shards_cont == clock / 50 - 2,
+                shards_cont == clock/50 - 2,
                 shards_pos - 0.01 <= shards,
                 # 1 < 0.01 + 0.99
                 shards < shards_pos + 0.99,
@@ -290,17 +290,6 @@ class PowerSolver:
     def solve(self):
         self.m.solve(disp=logger.level <= logging.DEBUG)
 
-        # todo: fixme - this should not be necessary
-        for recipe, (cont, pos) in self.shard_residuals.items():
-            cont = cont[0]
-            pos = pos[0]
-            if cont < 0 and pos > 0.005:
-                logger.error(
-                    f'The shard solution for "{recipe}" is wrong: '
-                    f'max(0, {cont:.3f}) = {pos:.3f} which produces an '
-                    f'incorrect shard count of {self.shards_each[recipe][0]}'
-                )
-
         solved = (
             SolvedRecipe(
                 self.recipes[recipe],
@@ -311,6 +300,32 @@ class PowerSolver:
         )
 
         self.solved.extend(chain.from_iterable(solved))
+
+        self.verify_shards()
+
+    def verify_shards(self):
+        # todo: fixme - this should not be necessary
+
+        act_total = self.actual_shards
+        est_total, = self.shard_total
+        if act_total != round(est_total):
+            logger.error(
+                f'The total shard solution is wrong: '
+                f'approx {est_total} != actual {act_total}'
+            )
+
+        for solved in self.solved:
+            name = solved.recipe.name
+            cont, pos = self.shard_residuals[name]
+            (cont,), (pos,) = cont, pos
+            act = solved.shards_each
+            est, = self.shards_each[name]
+            if act != round(est):
+                logger.error(
+                    f'The shard solution for "{name}" is wrong: '
+                    f'max(0, {cont:.3f}) = {pos:.3f}\n'
+                    f'This produces an incorrect shard count of {est} != {act}'
+                )
 
     @property
     def clock_scale_value(self) -> float:
