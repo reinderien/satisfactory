@@ -1,4 +1,4 @@
-from .power import PowerSolver
+from .power import PowerSolver, ShardMode
 from .rates import setup_linprog, solve_linprog, get_clocks, get_rates
 from .recipe import load_recipes
 
@@ -14,7 +14,10 @@ def hungry_plating():
 
     with PowerSolver(recipes,
                      percentages=dict(get_clocks(problem)),
-                     rates=dict(get_rates(problem))) as power:
+                     rates=dict(get_rates(problem)),
+                     # We care about shards, so this can't be NONE; but also
+                     # BINARY produces a non-optimal solution
+                     shard_mode=ShardMode.MPEC) as power:
         power.constraints(power.building_total <= 50,
                           power.shard_total <= 24,  # limiting factor
                           power.power_total <= 500e6)
@@ -34,8 +37,9 @@ def fast_rotors():
     with PowerSolver(recipes,
                      percentages=dict(get_clocks(problem)),
                      rates=dict(get_rates(problem)),
-                     scale_clock=True) as approx:
-        approx.constraints(approx.building_total <= 50,
+                     scale_clock=True,
+                     shard_mode=ShardMode.NONE) as approx:
+        approx.constraints(approx.building_total <= 25,
                            approx.power_total <= 100e6)
         approx.maximize(approx.clock_totals['Rotor'])
         approx.solve()
@@ -52,8 +56,9 @@ def fast_rotors():
 
     with PowerSolver(recipes,
                      percentages=dict(get_clocks(problem)),
-                     rates=dict(get_rates(problem))) as exact:
-        exact.constraints(exact.building_total <= 50)
+                     rates=dict(get_rates(problem)),
+                     shard_mode=ShardMode.NONE) as exact:
+        exact.constraints(exact.building_total <= 25)
         exact.minimize(exact.power_total)
         exact.solve()
         exact.print()

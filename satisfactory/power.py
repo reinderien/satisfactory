@@ -1,6 +1,8 @@
+import enum
 import logging
 import math
 from dataclasses import dataclass
+from enum import Enum
 from itertools import chain
 from numbers import Number
 from typing import Dict, Iterable, List, Tuple, TYPE_CHECKING
@@ -92,6 +94,23 @@ def pure_sum(series: Iterable[Number]) -> Number:
     return total
 
 
+@enum.unique
+class ShardMode(Enum):
+    NONE = enum.auto()
+    # See https://apmonitor.com/wiki/index.php/Main/Objects
+    MPEC = enum.auto()
+    # See https://apmonitor.com/wiki/index.php/Main/Objects
+    BINARY = enum.auto()
+
+    @property
+    def method_numeral(self) -> int:
+        if self == self.MPEC:
+            return 2
+        if self == self.BINARY:
+            return 3
+        raise NotImplementedError()
+
+
 class PowerSolver:
     def __init__(
         self,
@@ -99,9 +118,10 @@ class PowerSolver:
         percentages: Dict[str, float],
         rates: Dict[str, float],
         scale_clock: bool = False,
+        shard_mode: ShardMode = ShardMode.BINARY,
     ):
         self.solved: List[SolvedRecipe] = []
-        self.recipes, self.rates = recipes, rates
+        self.recipes, self.rates, self.shard_mode = recipes, rates, shard_mode
 
         recipe_clocks = [
             (recipes[recipe], clock)
@@ -129,7 +149,9 @@ class PowerSolver:
         self.buildings, self.building_total = self.define_buildings(recipe_clocks)
         self.powers, self.power_total = self.define_power(recipe_clocks)
         self.clocks_each, self.clock_totals = self.define_clocks(recipe_clocks)
-        self.shards_each, self.shard_totals, self.shard_total = self.define_shards()
+
+        if shard_mode != ShardMode.NONE:
+            self.shards_each, self.shard_totals, self.shard_total = self.define_shards()
 
     def __enter__(self):
         return self
@@ -232,11 +254,8 @@ class PowerSolver:
     ]:
         shards_each = {}
         shards_total = {}
-
         zero = self.m.Param(name='zero', value=0)
-
-        # todo - this needs to die
-        self.shard_residuals = {}
+        f_max = getattr(self.m, f'max{self.shard_mode.method_numeral}')
 
         for recipe, clock in self.clocks_each.items():
             # e.g.
@@ -245,8 +264,7 @@ class PowerSolver:
             # max(0, 100/50 - 2) = 0
             # 0 <= 0 < 1
             shards_cont = self.m.Var(name=f'{recipe} shards cont')
-            shards_pos = self.m.max2(zero, shards_cont)
-            self.shard_residuals[recipe] = shards_cont, shards_pos
+            shards_pos = f_max(zero, shards_cont)
 
             shards = shards_each[recipe] = self.m.Var(
                 name=f'{recipe} shards each',
@@ -259,14 +277,10 @@ class PowerSolver:
 
             # 100 corresponds to 0, so 100.5 corresponds to 0.01
             # This 0.5 offset is between two integer percentage points so there
-            # will be no boundary problems
-            # todo - sometimes this fails and the output of max2(), rather than
-            # being 0, is actually 1 - 0.99 = 0.01; and
-            # 1 < 0.01 + 0.99 is deemed true
+            # should be no boundary problems
             self.m.Equations((
                 shards_cont == clock/50 - 2,
                 shards_pos - 0.01 <= shards,
-                # 1 < 0.01 + 0.99
                 shards < shards_pos + 0.99,
             ))
 
@@ -304,8 +318,16 @@ class PowerSolver:
         self.verify_shards()
 
     def verify_shards(self):
-        # todo: fixme - this should not be necessary
+        if self.shard_mode == ShardMode.NONE:
+            return
 
+        if not any(
+            'shard_total' in eq.value
+            for eq in self.m._equations
+        ):
+            logger.warning('No shard constraints; switch to ShardMode.NONE')
+
+        has_error = False
         act_total = self.actual_shards
         est_total, = self.shard_total
         if act_total != round(est_total):
@@ -313,19 +335,24 @@ class PowerSolver:
                 f'The total shard solution is wrong: '
                 f'approx {est_total} != actual {act_total}'
             )
+            has_error = True
 
         for solved in self.solved:
             name = solved.recipe.name
-            cont, pos = self.shard_residuals[name]
-            (cont,), (pos,) = cont, pos
             act = solved.shards_each
             est, = self.shards_each[name]
             if act != round(est):
                 logger.error(
                     f'The shard solution for "{name}" is wrong: '
-                    f'max(0, {cont:.3f}) = {pos:.3f}\n'
-                    f'This produces an incorrect shard count of {est} != {act}'
+                    f'returned {est} != actual {act}'
                 )
+                has_error = True
+
+        if has_error:
+            if self.shard_mode == ShardMode.MPEC:
+                logger.info(f'Consider ShardMode.BINARY instead')
+        elif self.shard_mode == ShardMode.BINARY and self.actual_shards > 0:
+            logger.warning('ShardMode.BINARY risks this solution being non-optimal')
 
     @property
     def clock_scale_value(self) -> float:
@@ -365,11 +392,16 @@ class PowerSolver:
                 f'{s.recipe.secs_per_extra(self.rates, self.clock_scale_value):>7}'
             )
 
+        if self.shard_mode == ShardMode.NONE:
+            shards = '   '
+        else:
+            shards = f'{self.shard_total.value[0]:.0f}'
+
         print(
             f'{"Total approx":40} '
             f'{"":5} {"":>2} '
             f'{"":6} {self.power_total.value[0] / 1e6:>6.2f} '
-            f'{"":6} {self.shard_total.value[0]:>3.0f}\n'
+            f'{"":6} {shards:>3}\n'
             
             f'{"Total actual":40} '
             f'{"":5} {round(self.building_total.value[0]):>2} '
