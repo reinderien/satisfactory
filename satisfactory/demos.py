@@ -3,6 +3,29 @@ from .rates import setup_linprog, solve_linprog, get_clocks, get_rates
 from .recipe import load_recipes
 
 
+def multi_outputs():
+    print('Factory to produce modular frames, rotors and smart plating, '
+          'limited by building count, minimizing power')
+    recipes = load_recipes(tier_before=3)
+    problem = setup_linprog(
+        recipes,
+        fixed_clocks={
+            'Modular Frame': 100,
+            'Rotor': 100,
+            'Smart Plating': 100,
+        }
+    )
+    solve_linprog(problem)
+
+    with PowerSolver(recipes,
+                     percentages=dict(get_clocks(problem)),
+                     rates=dict(get_rates(problem))) as sol:
+        sol.constraints(sol.building_total <= 50)
+        sol.minimize(sol.power_total)
+        sol.solve()
+        sol.print()
+
+
 def hungry_plating():
     print('Factory to produce smart plating at at least 1 every 10s, '
           'minimizing the number of buildings, which implies huge power '
@@ -37,8 +60,7 @@ def fast_rotors():
     with PowerSolver(recipes,
                      percentages=dict(get_clocks(problem)),
                      rates=dict(get_rates(problem)),
-                     scale_clock=True,
-                     shard_mode=ShardMode.NONE) as approx:
+                     scale_clock=True) as approx:
         approx.constraints(approx.building_total <= 25,
                            approx.power_total <= 100e6)
         approx.maximize(approx.clock_totals['Rotor'])
@@ -56,8 +78,7 @@ def fast_rotors():
 
     with PowerSolver(recipes,
                      percentages=dict(get_clocks(problem)),
-                     rates=dict(get_rates(problem)),
-                     shard_mode=ShardMode.NONE) as exact:
+                     rates=dict(get_rates(problem))) as exact:
         exact.constraints(exact.building_total <= 25)
         exact.minimize(exact.power_total)
         exact.solve()

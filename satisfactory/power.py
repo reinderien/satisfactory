@@ -118,7 +118,7 @@ class PowerSolver:
         percentages: Dict[str, float],
         rates: Dict[str, float],
         scale_clock: bool = False,
-        shard_mode: ShardMode = ShardMode.BINARY,
+        shard_mode: ShardMode = ShardMode.NONE,
     ):
         self.solved: List[SolvedRecipe] = []
         self.recipes, self.rates, self.shard_mode = recipes, rates, shard_mode
