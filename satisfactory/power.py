@@ -27,7 +27,11 @@ that minimizes power consumption.
 """
 
 
-APOPT = 1
+@enum.unique
+class Solver(Enum):
+    APOPT = 1  # "Advanced process"
+    BPOPT = 2  # "building information modeling performance"
+    IPOPT = 3  # "Interior point"
 
 
 @dataclass
@@ -130,12 +134,6 @@ class PowerSolver:
 
         # No network; discontinuous problem; respect integer constraints
         self.m = m = GEKKO(remote=False, name='satisfactory_power')
-        m.options.solver = APOPT
-        m.solver_options = [
-            'minlp_as_nlp 0',
-            'minlp_gap_tol 1e-3',
-            'minlp_integer_tol 1e-3',
-        ]
 
         if scale_clock:
             logger.warning('Scaling enabled; inexact solution likely')
@@ -301,8 +299,34 @@ class PowerSolver:
     def minimize(self, expr: GK_Operators):
         self.m.Minimize(expr)
 
-    def solve(self):
+    def _solve(self, solver: Solver, **kwargs):
+        logger.info(f'Solving with {solver.name}...')
+        self.m.options.solver = solver.value
+        self.m.solver_options = [
+            f'{k} {v}' for k, v in kwargs.items()
+        ]
         self.m.solve(disp=logger.level <= logging.DEBUG)
+
+        logger.info(
+            f'Solved for '
+            f'buildings={self.building_total[0]:.1f} '
+            f'power={self.power_total[0]/1e6:.1f}MW '
+            f'shards={self.actual_shards}'
+        )
+
+    def solve(self):
+        self._solve(
+            Solver.IPOPT,
+            # https://coin-or.github.io/Ipopt/OPTIONS.html
+            print_level=0,
+        )
+
+        self._solve(
+            Solver.APOPT,
+            # https://apopt.com/download.php
+            minlp_as_nlp=0,
+            minlp_print_level=0,
+        )
 
         solved = (
             SolvedRecipe(

@@ -65,7 +65,6 @@ def fast_rotors():
                            approx.power_total <= 100e6)
         approx.maximize(approx.clock_totals['Rotor'])
         approx.solve()
-        approx.print()
 
     print('\nRefined:')
     problem = setup_linprog(
