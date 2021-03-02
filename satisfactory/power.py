@@ -34,6 +34,14 @@ class Solver(Enum):
     IPOPT = 3  # "Interior point"
 
 
+@enum.unique
+class BranchMethod(Enum):
+    DEPTH_FIRST = 1
+    BREADTH_FIRST = 2
+    LOWEST_LEAF = 3
+    HIGHEST_LEAF = 4
+
+
 @dataclass
 class SolvedRecipe:
     recipe: 'Recipe'
@@ -326,6 +334,7 @@ class PowerSolver:
             # https://apopt.com/download.php
             minlp_as_nlp=0,
             minlp_print_level=0,
+            minlp_branch_method=BranchMethod.BREADTH_FIRST.value,
         )
 
         solved = (
