@@ -220,8 +220,8 @@ class PowerSolver:
         self,
         recipe_clocks: List[Tuple['Recipe', float]],
     ) -> Tuple[
-        Dict[str, GK_Intermediate],
-        Dict[str, GK_Intermediate],
+        Dict[str, GK_Intermediate],  # clocks_each
+        Dict[str, GK_Intermediate],  # clock_totals
     ]:
         clock_totals = [
             self.m.Intermediate(

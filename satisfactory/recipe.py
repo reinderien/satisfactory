@@ -3,7 +3,7 @@ import re
 from dataclasses import dataclass
 from itertools import count, chain
 from pathlib import Path
-from typing import ClassVar, Collection, Dict, Iterable, List, Pattern, Set, Any
+from typing import ClassVar, Collection, Dict, Iterable, List, Pattern, Set
 
 from requests import Session
 
@@ -95,7 +95,10 @@ class Recipe:
     BASE_POWERS: ClassVar[Dict[str, float]] = {
         'Smelter': 4e6,
         'Constructor': 4e6,
+        'Packager': 10e6,
         'Assembler': 15e6,
+        'Foundry': 16e6,
+        'Manufacturer': 55e6,
         'Miner Mk. 1': 5e6,
         'Miner Mk. 2': 12e6,
         'Miner Mk. 3': 30e6,
