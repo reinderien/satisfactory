@@ -3,11 +3,18 @@ import re
 from dataclasses import dataclass
 from itertools import count, chain
 from pathlib import Path
-from typing import ClassVar, Collection, Dict, Iterable, List, Pattern
+from typing import ClassVar, Collection, Dict, Iterable, List, Pattern, Set, Any
 
 from requests import Session
 
 from .logs import logger
+
+
+MAX_RECIPES = 50
+
+
+class MediaWikiError(Exception):
+    pass
 
 
 def get_api(session: Session, **kwargs) -> Iterable[str]:
@@ -33,6 +40,12 @@ def get_api(session: Session, **kwargs) -> Iterable[str]:
                 for warning in entries.values():
                     logger.warning(f'%s: %s', title, warning)
 
+        error = data.get('error')
+        if error:
+            raise MediaWikiError(
+                f'{error["code"]}: {error["info"]}'
+            )
+
         for page in data['query']['pages'].values():
             revision, = page['revisions']
             yield revision['slots']['main']['*']
@@ -43,15 +56,27 @@ def get_api(session: Session, **kwargs) -> Iterable[str]:
         params.update(data['continue'])
 
 
-def parse_template(content: str, tier_before: int) -> List[str]:
+def parse_template(content: str, tiers: Set[str]) -> List[str]:
     start = content.index('\n| group2     = Components\n')
-    end = content.index(f'[[Tier {tier_before}]]', start)
+    end = content.index(f'\n}}', start)
+    content = content[start: end]
 
-    return re.findall(
-        r'(?<={{ItemLink\|)'
-        r'[\w\s]+',
-        content[start: end],
-    )
+    for tier_start in re.finditer(
+        r'^   \| group\d = \[\[(.+)\]\]$', content, re.M,
+    ):
+        tier_name = tier_start[1]
+        if tier_name not in tiers:
+            continue
+
+        tier_index = tier_start.end() + 1
+        list_content = content[tier_index: content.find('\n', tier_index)]
+
+        for name in re.finditer(
+            r'(?<={{ItemLink\|)'
+            r'[^|\}]+',
+            list_content,
+        ):
+            yield name[0]
 
 
 @dataclass
@@ -219,15 +244,22 @@ def fill_missing(
         yield from Recipe.from_ore_page(missing_input)
 
 
-def get_recipes(tier_before: int) -> Dict[str, Recipe]:
-    with Session() as session:
-        component_text, = get_api(session, titles='Template:ItemNav')
-        component_names = parse_template(component_text, tier_before)
-        component_pages = get_api(
+def fetch_recipes(session: Session, names: List[str]) -> Iterable[str]:
+    for start in range(0, len(names), MAX_RECIPES):
+        name_segment = names[start: start+MAX_RECIPES]
+        yield from get_api(
             session,
-            titles='|'.join(component_names),
+            titles='|'.join(name_segment),
             # rvsection=2,  # does not work for Biomass
         )
+
+
+def get_recipes(tiers: Set[str]) -> Dict[str, Recipe]:
+    with Session() as session:
+        component_text, = get_api(session, titles='Template:ItemNav')
+        component_names = sorted(set(parse_template(component_text, tiers)))
+
+        component_pages = fetch_recipes(session, component_names)
 
         recipes = list(chain.from_iterable(
             Recipe.from_component_page(page)
@@ -238,8 +270,8 @@ def get_recipes(tier_before: int) -> Dict[str, Recipe]:
     return {r.name: r for r in recipes}
 
 
-def load_recipes(tier_before: int) -> Dict[str, Recipe]:
-    logger.info(f'Loading recipe database up to tier {tier_before - 1}...')
+def load_recipes(tiers: Set[str]) -> Dict[str, Recipe]:
+    logger.info(f'Loading recipe database for {len(tiers)} tiers...')
 
     fn = Path('.recipes')
     if fn.exists():
@@ -247,7 +279,7 @@ def load_recipes(tier_before: int) -> Dict[str, Recipe]:
             return pickle.load(f)
 
     logger.info('Fetching recipe data from MediaWiki...')
-    recipes = get_recipes(tier_before)
+    recipes = get_recipes(tiers)
     with fn.open('wb') as f:
         pickle.dump(recipes, f)
     logger.info(f'{len(recipes)} recipes loaded.')

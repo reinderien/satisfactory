@@ -3,10 +3,20 @@ from .rates import setup_linprog, solve_linprog, get_clocks, get_rates
 from .recipe import load_recipes
 
 
+TIERS_TO_5 = {
+    'Tier 0',
+    'Tier 1',
+    'Tier 2',
+    'Tier 3',
+    'Tier 4',
+    'M.A.M.',
+}
+
+
 def multi_outputs():
     print('Factory to produce modular frames, rotors and smart plating, '
           'limited by building count, minimizing power')
-    recipes = load_recipes(tier_before=3)
+    recipes = load_recipes(TIERS_TO_5)
     problem = setup_linprog(
         recipes,
         fixed_clocks={
@@ -30,7 +40,7 @@ def hungry_plating():
     print('Factory to produce smart plating at at least 1 every 10s, '
           'minimizing the number of buildings, which implies huge power '
           'consumption and shards')
-    recipes = load_recipes(tier_before=3)
+    recipes = load_recipes(TIERS_TO_5)
     problem = setup_linprog(recipes,
                             min_rates={'Smart Plating': 0.1})
     solve_linprog(problem)
@@ -52,7 +62,7 @@ def hungry_plating():
 def fast_rotors():
     print('Factory to produce as many rotors as possible, limited by power and '
           'building count, via two-stage approximate scaling')
-    recipes = load_recipes(tier_before=3)
+    recipes = load_recipes(TIERS_TO_5)
     problem = setup_linprog(recipes,
                             fixed_clocks={'Rotor': 100})
     solve_linprog(problem)
