@@ -215,9 +215,6 @@ class Recipe:
             return '∞'
         return f'{1 / rate:.1f}'
 
-    def power_from_wiki(self, powers: Dict[str, str]):
-        self.base_power = 1e6 * float(powers[self.crafted_in])
-
 
 def fill_ores(
     session: Session, recipes: Collection[Recipe],
@@ -273,24 +270,39 @@ def parse_infoboxes(page: str) -> Iterable[Dict[str, str]]:
         yield dict(parse_box_attrs(box_content))
 
 
-def fetch_powers(
-    session: Session, building_names: Collection[str],
-) -> Iterable[Tuple[str, str]]:
+def fetch_power_info(
+    session: Session,
+    building_names: Collection[str],
+) -> Iterable[Tuple[str, Dict[str, str]]]:
     non_miners = dict(
-        get_api(session, titles='|'.join(
-            b for b in building_names if 'Miner' not in b
-        ))
+        get_api(
+            session,
+            titles='|'.join(
+                b for b in building_names if 'Miner' not in b
+            ),
+        )
     )
     for name, page in non_miners.items():
         info, = parse_infoboxes(page)
-        yield name, info['powerUsage']
+        yield name, info
 
     if any('Miner' in b for b in building_names):
         (_, miner_page), = get_api(session, titles='Miner')
         for info in parse_infoboxes(miner_page):
-            yield info['name'], info['powerUsage']
+            yield info['name'], info
 
-    # todo - apply tier filter
+
+def fetch_powers(
+    session: Session,
+    building_names: Collection[str],
+    tiers: Set[str],
+) -> Iterable[Tuple[str, float]]:
+    for name, info in fetch_power_info(session, building_names):
+        if any(
+            tier in info['researchTier']
+            for tier in tiers
+        ):
+            yield name, 1e6 * float(info['powerUsage'])
 
 
 def get_recipes(tiers: Set[str]) -> Dict[str, Recipe]:
@@ -307,13 +319,22 @@ def get_recipes(tiers: Set[str]) -> Dict[str, Recipe]:
 
         powers = dict(fetch_powers(
             session,
-            {recipe.crafted_in for recipe in recipes}
+            {recipe.crafted_in for recipe in recipes},
+            tiers,
         ))
 
+    above_tier = set()
     for recipe in recipes:
-        recipe.power_from_wiki(powers)
+        power = powers.get(recipe.crafted_in)
+        if power is None:
+            above_tier.add(recipe.name)
+        else:
+            recipe.base_power = power
 
-    return {r.name: r for r in recipes}
+    return {
+        r.name: r for r in recipes
+        if r.name not in above_tier
+    }
 
 
 def load_recipes(tiers: Set[str]) -> Dict[str, Recipe]:
