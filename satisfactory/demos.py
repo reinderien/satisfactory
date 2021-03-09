@@ -1,6 +1,6 @@
 from .power import PowerSolver, ShardMode
 from .rates import setup_linprog, solve_linprog, get_clocks, get_rates
-from .recipe import load_recipes
+from .recipe import load_recipes, graph_recipes
 
 
 TIERS_TO_5 = {
@@ -11,6 +11,11 @@ TIERS_TO_5 = {
     'Tier 4',
     'M.A.M.',
 }
+
+
+def graph_db():
+    recipes = load_recipes(TIERS_TO_5)
+    graph_recipes(recipes)
 
 
 def multi_outputs():

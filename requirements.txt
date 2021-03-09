@@ -1,3 +1,4 @@
 gekko
+graphviz
 requests
 swiglpk

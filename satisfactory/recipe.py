@@ -1,6 +1,7 @@
 import pickle
 import re
 from dataclasses import dataclass
+from graphviz import Digraph
 from itertools import count, chain
 from pathlib import Path
 from typing import ClassVar, Collection, Dict, Iterable, List, Pattern, Set, Tuple
@@ -351,3 +352,29 @@ def load_recipes(tiers: Set[str]) -> Dict[str, Recipe]:
         pickle.dump(recipes, f)
     logger.info(f'{len(recipes)} recipes loaded.')
     return recipes
+
+
+def graph_recipes(recipes: Dict[str, Recipe], fn: str = 'graphed-recipes.gv', view: bool = True):
+    dot = Digraph()
+
+    resources = set()
+    for recipe in recipes.values():
+        resources.update(recipe.rates.keys())
+
+    labels_to_i = {
+        label: str(i)
+        for i, label in enumerate(resources)
+    }
+
+    for label, i in labels_to_i.items():
+        dot.node(name=i, label=label)
+
+    for recipe in recipes.values():
+        for source, rate in recipe.rates.items():
+            if rate < 0:  # inputs only
+                dot.edge(
+                    labels_to_i[source],
+                    labels_to_i[recipe.first_output],
+                )
+
+    dot.render(fn, view=view)
