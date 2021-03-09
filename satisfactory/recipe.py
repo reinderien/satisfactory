@@ -354,8 +354,11 @@ def load_recipes(tiers: Set[str]) -> Dict[str, Recipe]:
     return recipes
 
 
-def graph_recipes(recipes: Dict[str, Recipe], fn: str = 'graphed-recipes.gv', view: bool = True):
-    dot = Digraph()
+def graph_recipes(recipes: Dict[str, Recipe], fn: str = 'recipes.gv', view: bool = True):
+    dot = Digraph(
+        name='Recipes for selected tiers',
+        filename=fn,
+    )
 
     resources = set()
     for recipe in recipes.values():
@@ -373,8 +376,9 @@ def graph_recipes(recipes: Dict[str, Recipe], fn: str = 'graphed-recipes.gv', vi
         for source, rate in recipe.rates.items():
             if rate < 0:  # inputs only
                 dot.edge(
-                    labels_to_i[source],
-                    labels_to_i[recipe.first_output],
+                    tail_name=labels_to_i[source],
+                    head_name=labels_to_i[recipe.first_output],
+                    label=f'{-1/rate:.2f} s/1',
                 )
 
-    dot.render(fn, view=view)
+    dot.render(view=view)
