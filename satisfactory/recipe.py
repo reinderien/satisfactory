@@ -3,7 +3,7 @@ import re
 from dataclasses import dataclass
 from itertools import count, chain
 from pathlib import Path
-from typing import ClassVar, Collection, Dict, Iterable, List, Pattern, Set
+from typing import ClassVar, Collection, Dict, Iterable, List, Pattern, Set, Tuple
 
 from requests import Session
 
@@ -17,7 +17,7 @@ class MediaWikiError(Exception):
     pass
 
 
-def get_api(session: Session, **kwargs) -> Iterable[str]:
+def get_api(session: Session, **kwargs) -> Iterable[Tuple[str, str]]:
     params = {
         'action': 'query',
         'prop': 'revisions',
@@ -47,8 +47,12 @@ def get_api(session: Session, **kwargs) -> Iterable[str]:
             )
 
         for page in data['query']['pages'].values():
-            revision, = page['revisions']
-            yield revision['slots']['main']['*']
+            revisions = page.get('revisions')
+            if revisions is None and 'missing' in page:
+                logger.warning(f'Page "{page["title"]}" missing')
+            else:
+                revision, = revisions
+                yield page['title'], revision['slots']['main']['*']
 
         if 'batchcomplete' in data:
             break
@@ -88,25 +92,11 @@ class Recipe:
 
     rates: Dict[str, float]
 
-    parse_re: ClassVar[Pattern] = re.compile(
+    _parse_re: ClassVar[Pattern] = re.compile(
         r'{{CraftingTable(.+?)}}', re.I | re.S,
     )
 
-    BASE_POWERS: ClassVar[Dict[str, float]] = {
-        'Smelter': 4e6,
-        'Constructor': 4e6,
-        'Packager': 10e6,
-        'Assembler': 15e6,
-        'Foundry': 16e6,
-        'Manufacturer': 55e6,
-        'Miner Mk. 1': 5e6,
-        'Miner Mk. 2': 12e6,
-        'Miner Mk. 3': 30e6,
-    }
-
-    @property
-    def base_power(self) -> float:
-        return self.BASE_POWERS[self.crafted_in]
+    base_power: float = None
 
     @property
     def first_output(self) -> str:
@@ -121,7 +111,7 @@ class Recipe:
 
     @classmethod
     def get_attrs(cls, page: str) -> Iterable[Dict[str, str]]:
-        for match in cls.parse_re.finditer(page):
+        for match in cls._parse_re.finditer(page):
             recipe = match[1]
             yield dict(
                 tuple(elm.strip() for elm in kv.split('='))
@@ -170,7 +160,7 @@ class Recipe:
             )
 
     @classmethod
-    def from_ore_page(cls, page: str, max_miner: int = 1) -> Iterable['Recipe']:
+    def from_ore_page(cls, page: str) -> Iterable['Recipe']:
         if '[[Category:Ores]]' not in page:
             return ()
 
@@ -207,9 +197,7 @@ class Recipe:
                 (3, 'Normal', 4.0),
                 (3, 'Pure', 8.0),
         ):
-            if mark > max_miner:
-                break
-            crafted_in = f'{attrs["craftedIn"]} Mk. {mark}'
+            crafted_in = f'{attrs["craftedIn"]} Mk.{mark}'
             yield cls(
                 name=f'{attrs["recipeName"]} from '
                      f'{crafted_in} on {purity} node',
@@ -227,9 +215,12 @@ class Recipe:
             return '∞'
         return f'{1 / rate:.1f}'
 
+    def power_from_wiki(self, powers: Dict[str, str]):
+        self.base_power = 1e6 * float(powers[self.crafted_in])
 
-def fill_missing(
-        session: Session, recipes: Collection[Recipe]
+
+def fill_ores(
+    session: Session, recipes: Collection[Recipe],
 ) -> Iterable[Recipe]:
     known_products = set()
     all_inputs = set()
@@ -243,11 +234,11 @@ def fill_missing(
     missing_input_names = all_inputs - known_products
     inputs = get_api(session, titles='|'.join(missing_input_names))
 
-    for missing_input in inputs:
+    for title, missing_input in inputs:
         yield from Recipe.from_ore_page(missing_input)
 
 
-def fetch_recipes(session: Session, names: List[str]) -> Iterable[str]:
+def fetch_recipes(session: Session, names: List[str]) -> Iterable[Tuple[str, str]]:
     for start in range(0, len(names), MAX_RECIPES):
         name_segment = names[start: start+MAX_RECIPES]
         yield from get_api(
@@ -257,18 +248,70 @@ def fetch_recipes(session: Session, names: List[str]) -> Iterable[str]:
         )
 
 
+def parse_box_attrs(content: str) -> Iterable[Tuple[str, str]]:
+    for match in re.finditer(
+        r'^'
+        r'\s*\|'
+        r'\s*(\w+?)'
+        r'\s*='
+        r'\s*([^=|]+?)'
+        r'\s*$',
+        content,
+        re.M,
+    ):
+        yield match.groups()
+
+
+def parse_infoboxes(page: str) -> Iterable[Dict[str, str]]:
+    for box_match in re.finditer(
+        r'^{{Infobox.*$', page, re.M,
+    ):
+        box_content = page[
+            box_match.end() + 1:
+            page.index('}}\n', box_match.end() + 1)
+        ]
+        yield dict(parse_box_attrs(box_content))
+
+
+def fetch_powers(
+    session: Session, building_names: Collection[str],
+) -> Iterable[Tuple[str, str]]:
+    non_miners = dict(
+        get_api(session, titles='|'.join(
+            b for b in building_names if 'Miner' not in b
+        ))
+    )
+    for name, page in non_miners.items():
+        info, = parse_infoboxes(page)
+        yield name, info['powerUsage']
+
+    if any('Miner' in b for b in building_names):
+        (_, miner_page), = get_api(session, titles='Miner')
+        for info in parse_infoboxes(miner_page):
+            yield info['name'], info['powerUsage']
+
+    # todo - apply tier filter
+
+
 def get_recipes(tiers: Set[str]) -> Dict[str, Recipe]:
     with Session() as session:
-        component_text, = get_api(session, titles='Template:ItemNav')
+        (_, component_text), = get_api(session, titles='Template:ItemNav')
         component_names = sorted(set(parse_template(component_text, tiers)))
-
         component_pages = fetch_recipes(session, component_names)
 
         recipes = list(chain.from_iterable(
             Recipe.from_component_page(page)
-            for page in component_pages
+            for title, page in component_pages
         ))
-        recipes.extend(fill_missing(session, recipes))
+        recipes.extend(fill_ores(session, recipes))
+
+        powers = dict(fetch_powers(
+            session,
+            {recipe.crafted_in for recipe in recipes}
+        ))
+
+    for recipe in recipes:
+        recipe.power_from_wiki(powers)
 
     return {r.name: r for r in recipes}
 
