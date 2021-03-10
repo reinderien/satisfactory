@@ -149,16 +149,52 @@ def setup_linprog(
     return problem
 
 
-def check_lp(code: int):
-    if code == 0:
-        return
+def check_lp(problem: SwigPyObject, code: int):
+    msg = ''
 
-    codes = {
-        getattr(lp, k): k
-        for k in dir(lp)
-        if k.startswith('GLP_E')
+    statuses = {
+        getattr(lp, f'GLP_{stat}'): stat
+        for stat in (
+            'OPT',
+            'FEAS',
+            'INFEAS',
+            'NOFEAS',
+            'UNBND',
+            'UNDEF',
+        )
     }
-    raise ValueError(f'gltk returned {codes[code]}')
+
+    generic, primal, dual = (
+        getattr(lp, f'glp_get_{fun}')(problem)
+        for fun in (
+            'status',
+            'prim_stat',
+            'dual_stat',
+        )
+    )
+
+    if (
+        generic != lp.GLP_OPT
+        or primal != lp.GLP_FEAS
+        or dual != lp.GLP_FEAS
+    ):
+        msg += (
+            'Mehrotra feasibility constraints failed: '
+            f'generic {statuses[generic]}, '
+            f'primal {statuses[primal]}, '
+            f'dual {statuses[dual]}'
+        )
+
+    if code != 0:
+        codes = {
+            getattr(lp, k): k
+            for k in dir(lp)
+            if k.startswith('GLP_E')
+        }
+        msg += f'gltk returned {codes[code]}'
+
+    if msg:
+        raise ValueError(msg)
 
 
 def log_soln(problem: SwigPyObject, kind: str):
@@ -197,13 +233,13 @@ def solve_linprog(problem: SwigPyObject):
     parm = lp.glp_smcp()
     lp.glp_init_smcp(parm)
     parm.msg_lev = level
-    check_lp(lp.glp_simplex(problem, parm))
+    check_lp(problem, lp.glp_simplex(problem, parm))
     log_soln(problem, 'sol')
 
     parm = lp.glp_iocp()
     lp.glp_init_iocp(parm)
     parm.msg_lev = level
-    check_lp(lp.glp_intopt(problem, parm))
+    check_lp(problem, lp.glp_intopt(problem, parm))
     log_soln(problem, 'mip')
 
 
