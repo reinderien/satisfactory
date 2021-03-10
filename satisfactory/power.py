@@ -86,10 +86,15 @@ class SolvedRecipe:
         return f'{self.recipe} ×{self.n}'
 
     @property
-    def description(self) -> str:
+    def html_description(self) -> str:
+        """
+        graphviz dot html notation
+        """
         return (
-            f'{self.recipe.building_name}\n'
-            f'{self.n} × {self.clock_each}%'
+            '<'
+            f'{self.recipe.building_name} <br/>'
+            f'{self.clock_each}% &times; {self.n}'
+            '>'
         )
 
     def distribute(self) -> Tuple['SolvedRecipe', ...]:
@@ -463,7 +468,7 @@ class PowerSolver:
         for i, solved in building_indices:
             dot.node(
                 name=str(i),
-                label=solved.description,
+                label=solved.html_description,
                 color='#FF7F00',
             )
 
