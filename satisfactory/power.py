@@ -458,29 +458,44 @@ class PowerSolver:
         )
 
         # Eventually we will need splitter and merger nodes - todo
-        i_solved = tuple(enumerate(self.solved))
-        for i, solved in i_solved:
-            dot.node(name=str(i), label=solved.description)
+        # but for now make intermediate resource-routing nodes
+        building_indices = tuple(enumerate(self.solved))
+        for i, solved in building_indices:
+            dot.node(
+                name=str(i),
+                label=solved.description,
+                color='#FF7F00',
+            )
 
-        output_indices = defaultdict(list)
+        resources = {
+            resource
+            for solved in self.solved
+            for resource in solved.recipe.rates.keys()
+        }
+        res_by_name = {
+            resource: i
+            for i, resource in enumerate(resources, len(building_indices))
+        }
+        for resource, i in res_by_name.items():
+            dot.node(
+                name=str(i),
+                label=resource,
+                color='#77B5E7',
+            )
 
-        for src_i, solved in i_solved:
+        for i_building, solved in building_indices:
             for resource, rate in solved.recipe.rates.items():
-                if rate > 0:  # output
-                    output_indices[resource].append(str(src_i))
-
-        for dest_i, solved in i_solved:
-            for resource, rate in solved.recipe.rates.items():
+                source, dest = i_building, res_by_name[resource]
                 if rate < 0:  # input
-                    for src_i in output_indices[resource]:
-                        # This resource has an edge from src_i to dest_i
-                        dot.edge(
-                            tail_name=src_i,
-                            head_name=str(dest_i),
-                            label=(
-                                f'{resource}\n'
-                                f'{-1/rate:.2f} s/1'
-                            ),
-                        )
+                    source, dest = dest, source
+                    rate = -rate
+
+                throughput = rate * solved.clock_total/100
+
+                dot.edge(
+                    tail_name=str(source),
+                    head_name=str(dest),
+                    label=f'{1/throughput:.2f} s/1',
+                )
 
         dot.render(view=view)
