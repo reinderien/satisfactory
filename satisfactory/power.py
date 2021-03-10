@@ -329,6 +329,18 @@ class PowerSolver:
         ]
         self.m.solve(disp=logger.level <= logging.DEBUG)
 
+        solved = (
+            SolvedRecipe(
+                self.recipes[recipe],
+                round(building.value[0]),
+                round(self.clock_totals[recipe].value[0]),
+            ).distribute()
+            for recipe, building in self.buildings.items()
+        )
+
+        self.solved.clear()
+        self.solved.extend(chain.from_iterable(solved))
+
         logger.info(
             f'Solved for '
             f'buildings={self.building_total[0]:.1f} '
@@ -350,17 +362,6 @@ class PowerSolver:
             minlp_print_level=0,
             minlp_branch_method=BranchMethod.BREADTH_FIRST.value,
         )
-
-        solved = (
-            SolvedRecipe(
-                self.recipes[recipe],
-                round(building.value[0]),
-                round(self.clock_totals[recipe].value[0]),
-            ).distribute()
-            for recipe, building in self.buildings.items()
-        )
-
-        self.solved.extend(chain.from_iterable(solved))
 
         self.verify_shards()
 
@@ -418,24 +419,24 @@ class PowerSolver:
 
     def print(self):
         print(
-            f'{"Recipe":40} '
+            f'{"Recipe":>45} '
             f'{"Clock":5} '
-            f'{"n":>2} '
+            f'{"n":>3} '
 
             f'{"P (MW)":>6} {"tot":>6} '
             f'{"shards":>6} {"tot":>3} '
-            f'{"s/out":>5} {"tot":>4} {"s/extra":>7}'
+            f'{"s/out":>5} {"tot":>5} {"s/extra":>7}'
         )
 
         for s in self.solved:
             print(
-                f'{s.recipe.name:40} '
+                f'{s.recipe.name:>45} '
                 f'{s.clock_each:>5.0f} '
-                f'{s.n:>2} '
+                f'{s.n:>3} '
 
                 f'{s.power_each / 1e6:>6.2f} {s.power_total / 1e6:>6.2f} '
                 f'{s.shards_each:>6} {s.shards_total:>3} '
-                f'{s.secs_per_output_each:>5.1f} {s.secs_per_output_total:>4.1f} '
+                f'{s.secs_per_output_each:>5.1f} {s.secs_per_output_total:>5.1f} '
                 f'{s.recipe.secs_per_extra(self.rates, self.clock_scale_value):>7}'
             )
 
@@ -445,13 +446,13 @@ class PowerSolver:
             shards = f'{self.shard_total.value[0]:.0f}'
 
         print(
-            f'{"Total approx":40} '
-            f'{"":5} {"":>2} '
+            f'{"Total approx":>45} '
+            f'{"":5} {"":>3} '
             f'{"":6} {self.power_total.value[0] / 1e6:>6.2f} '
             f'{"":6} {shards:>3}\n'
             
-            f'{"Total actual":40} '
-            f'{"":5} {round(self.building_total.value[0]):>2} '
+            f'{"Total actual":>45} '
+            f'{"":5} {round(self.building_total.value[0]):>3} '
             f'{"":6} {self.actual_power / 1e6:>6.2f} '
             f'{"":6} {self.actual_shards:>3}'
         )
