@@ -162,7 +162,13 @@ class Recipe:
 
     @classmethod
     def from_ore_page(cls, page: str) -> Iterable['Recipe']:
-        if '[[Category:Ores]]' not in page:
+        if not any(
+            ore_str in page
+            for ore_str in (
+                '[[Category:Ores]]',
+                '| category = Ores',
+            )
+        ):
             return ()
 
         '''
