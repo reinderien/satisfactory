@@ -216,6 +216,12 @@ class Recipe:
             return '∞'
         return f'{1 / rate:.1f}'
 
+    @property
+    def building_name(self) -> str:
+        if 'Miner' in self.crafted_in:
+            return self.name.split('from ')[1]
+        return self.crafted_in
+
 
 def fill_ores(
     session: Session, recipes: Collection[Recipe],
@@ -354,7 +360,11 @@ def load_recipes(tiers: Set[str]) -> Dict[str, Recipe]:
     return recipes
 
 
-def graph_recipes(recipes: Dict[str, Recipe], fn: str = 'recipes.gv', view: bool = True):
+def graph_recipes(
+    recipes: Dict[str, Recipe],
+    fn: str = 'recipes.gv',
+    view: bool = True,
+):
     dot = Digraph(
         name='Recipes for selected tiers',
         filename=fn,

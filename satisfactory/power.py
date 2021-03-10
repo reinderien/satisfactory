@@ -1,6 +1,7 @@
 import enum
 import logging
 import math
+from collections import defaultdict
 from dataclasses import dataclass
 from enum import Enum
 from itertools import chain
@@ -10,6 +11,7 @@ from typing import Dict, Iterable, List, Tuple, TYPE_CHECKING
 from gekko import GEKKO
 from gekko.gk_operators import GK_Intermediate, GK_Operators
 from gekko.gk_variable import GKVariable
+from graphviz import Digraph
 
 from .logs import logger
 
@@ -82,6 +84,13 @@ class SolvedRecipe:
 
     def __str__(self):
         return f'{self.recipe} ×{self.n}'
+
+    @property
+    def description(self) -> str:
+        return (
+            f'{self.recipe.building_name}\n'
+            f'{self.n} × {self.clock_each}%'
+        )
 
     def distribute(self) -> Tuple['SolvedRecipe', ...]:
         clock = round(self.clock_total)
@@ -441,3 +450,37 @@ class PowerSolver:
             f'{"":6} {self.actual_power / 1e6:>6.2f} '
             f'{"":6} {self.actual_shards:>3}'
         )
+
+    def graph(self, fn: str = 'solution.gv', view: bool = True):
+        dot = Digraph(
+            name='Recipes for selected tiers',
+            filename=fn,
+        )
+
+        # Eventually we will need splitter and merger nodes - todo
+        i_solved = tuple(enumerate(self.solved))
+        for i, solved in i_solved:
+            dot.node(name=str(i), label=solved.description)
+
+        output_indices = defaultdict(list)
+
+        for src_i, solved in i_solved:
+            for resource, rate in solved.recipe.rates.items():
+                if rate > 0:  # output
+                    output_indices[resource].append(str(src_i))
+
+        for dest_i, solved in i_solved:
+            for resource, rate in solved.recipe.rates.items():
+                if rate < 0:  # input
+                    for src_i in output_indices[resource]:
+                        # This resource has an edge from src_i to dest_i
+                        dot.edge(
+                            tail_name=src_i,
+                            head_name=str(dest_i),
+                            label=(
+                                f'{resource}\n'
+                                f'{-1/rate:.2f} s/1'
+                            ),
+                        )
+
+        dot.render(view=view)

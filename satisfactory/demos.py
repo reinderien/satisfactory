@@ -39,6 +39,7 @@ def multi_outputs():
         sol.minimize(sol.power_total)
         sol.solve()
         sol.print()
+        sol.graph()
 
 
 def hungry_plating():
@@ -62,6 +63,7 @@ def hungry_plating():
         power.minimize(power.building_total)
         power.solve()
         power.print()
+        power.graph()
 
 
 def fast_rotors():
@@ -97,3 +99,4 @@ def fast_rotors():
         exact.minimize(exact.power_total)
         exact.solve()
         exact.print()
+        exact.graph()
