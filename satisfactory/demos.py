@@ -100,3 +100,45 @@ def fast_rotors():
         exact.solve()
         exact.print()
         exact.graph()
+
+
+def big_tier_4():
+    print('Factory to produce a collection of tier-4 resources, limited by '
+          'power and building count')
+
+    recipes = load_recipes(TIERS_TO_5)
+    problem = setup_linprog(recipes,
+                            min_clocks={
+                                'A.I. Limiter': 100,
+                                'Automated Wiring': 100,
+                                'Motor': 100,
+                                'Quartz Crystal': 100,
+                                'Smart Plating': 100,
+                                'Versatile Framework': 100,
+                            })
+    solve_linprog(problem)
+
+    with PowerSolver(recipes,
+                     percentages=dict(get_clocks(problem)),
+                     rates=dict(get_rates(problem)),
+                     scale_clock=True) as approx:
+        approx.constraints(approx.building_total <= 100,
+                           approx.power_total <= 375e6)
+        approx.maximize(approx.clock_totals['Automated Wiring'])
+        approx.solve()
+
+    print('\nRefined:')
+    problem = setup_linprog(
+        recipes,
+        min_clocks={solved.recipe.name: round(solved.clock_total)
+                      for solved in approx.solved})
+    solve_linprog(problem)
+
+    with PowerSolver(recipes,
+                     percentages=dict(get_clocks(problem)),
+                     rates=dict(get_rates(problem))) as exact:
+        exact.constraints(exact.building_total <= 100)
+        exact.minimize(exact.power_total)
+        exact.solve()
+        exact.print()
+        exact.graph()
