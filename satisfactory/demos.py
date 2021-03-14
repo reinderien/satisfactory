@@ -1,4 +1,7 @@
 from contextlib import contextmanager
+from sys import stderr
+from typing import Tuple, Dict
+from gekko.gk_operators import GK_Operators
 
 from .power import PowerSolver, ShardMode
 from .rates import setup_linprog, solve_linprog, get_clocks, get_rates
@@ -149,7 +152,7 @@ def big_tier_4():
 def current():
     print('Current gameplay based on fixed mine recipes')
 
-    def constraints(power):
+    def constraints(power) -> Tuple[GK_Operators, ...]:
         return (
             power.building_total <= 100,
             power.power_total <= 300e6,
@@ -160,8 +163,10 @@ def current():
         )
 
     recipes = load_recipes(TIERS_TO_5)
+
     @contextmanager
     def solve(problem, **kwargs):
+        solve_linprog(problem)
         with PowerSolver(recipes,
                          percentages=dict(get_clocks(problem)),
                          rates=dict(get_rates(problem)),
@@ -170,45 +175,60 @@ def current():
             yield power
             power.solve()
 
-    problem = setup_linprog(recipes,
-                            min_rates={
-                                'A.I. Limiter': 0.1,
-                                'Encased Industrial Beam': 0.1,
-                                'Heavy Modular Frame': 0.1,
-                                'Motor': 0.1,
-                                'Versatile Framework': 0.1,
-                            })
-    solve_linprog(problem)
+    def round_clocks(power) -> Dict[str, int]:
+        return {solved.recipe.name: round(solved.clock_total)
+                for solved in power.solved}
 
-    for iteration in range(2):
+    min_rates = {
+        'A.I. Limiter': 0.1,
+        'Encased Industrial Beam': 0.1,
+        'Heavy Modular Frame': 0.1,
+        'Motor': 0.1,
+        'Versatile Framework': 0.1,
+    }
+    fixed_clocks = None
 
-        with PowerSolver(recipes,
-                         percentages=dict(get_clocks(problem)),
-                         rates=dict(get_rates(problem)),
-                         # shard_mode=ShardMode.BINARY,
-                         scale_clock=True) as approx:
+    best_rate = 0
+    best_soln = None
 
-            constraints =
+    for i in range(3):
+        print(f'\nIteration {i}', file=stderr)
 
-            approx.constraints(*constraints)
+        print('\nScale clocks, maximize throughput', file=stderr)
+        stderr.flush()
+        with solve(
+            setup_linprog(
+                recipes,
+                min_rates=min_rates,
+                min_clocks=fixed_clocks,
+            ),
+            # shard_mode=ShardMode.BINARY,
+            scale_clock=True,
+        ) as approx:
             approx.maximize(approx.clock_totals['Versatile Framework'])
-            approx.solve()
-            approx.print()
 
-        problem = setup_linprog(
-            recipes,
-            min_clocks={solved.recipe.name: round(solved.clock_total)
-                        for solved in approx.solved})
-        solve_linprog(problem)
+        min_rates = None
+        print('\nExact, minimize buildings', file=stderr)
+        stderr.flush()
+        with solve(
+            setup_linprog(
+                recipes,
+                min_clocks=round_clocks(approx),
+            ),
+        ) as exact:
+            exact.minimize(exact.power_total)
 
-        with PowerSolver(recipes,
-                         percentages=dict(get_clocks(problem)),
-                         rates=dict(get_rates(problem))) as exact:
-            exact.constraints(*constraints)
-            exact.minimize(exact.building_total)
-            exact.solve()
-            exact.print()
+        delay = next(
+            s for s in exact.solved if s.recipe.name == 'Versatile Framework'
+        ).secs_per_output_total
+        print(f's/Versatile Framework: {delay}', file=stderr)
 
-        approx = exact
+        rate = 1/delay
+        if best_rate < rate:
+            best_rate = rate
+            best_soln = exact
 
-    exact.graph()
+        fixed_clocks = round_clocks(exact)
+
+    best_soln.print()
+    best_soln.graph()
