@@ -1,7 +1,6 @@
 import enum
 import logging
 import math
-from collections import defaultdict
 from dataclasses import dataclass
 from enum import Enum
 from itertools import chain
@@ -183,23 +182,20 @@ class PowerSolver:
         Dict[str, GKVariable],
         GK_Intermediate,
     ]:
-        buildings = [
-            self.m.Var(
+        buildings = {
+            recipe.name: self.m.Var(
                 name=f'{recipe.name} buildings',
                 integer=True,
                 lb=1,
                 value=max(1, clock//100),
             )
             for recipe, clock in recipe_clocks
-        ]
+        }
 
         return (
-            {
-                recipe.name: building
-                for (recipe, _), building in zip(recipe_clocks, buildings)
-            },
+            buildings,
             self.m.Intermediate(
-                pure_sum(buildings), name='building_total',
+                pure_sum(buildings.values()), name='building_total',
             )
         )
 
@@ -210,23 +206,20 @@ class PowerSolver:
         Dict[str, GK_Intermediate],
         GK_Intermediate,
     ]:
-        powers = [
-            self.m.Intermediate(
+        powers = {
+            recipe.name: self.m.Intermediate(
                 self.buildings[recipe.name]**-0.6
                 * (clock * self.clock_scale / 100)**1.6
                 * recipe.base_power,
                 name=f'{recipe.name} power'
             )
             for recipe, clock in recipe_clocks
-        ]
+        }
 
         return (
-            {
-                recipe.name: power
-                for (recipe, _), power in zip(recipe_clocks, powers)
-            },
+            powers,
             self.m.Intermediate(
-                pure_sum(powers), name=f'power_total',
+                pure_sum(powers.values()), name=f'power_total',
             ),
         )
 
@@ -237,35 +230,26 @@ class PowerSolver:
         Dict[str, GK_Intermediate],  # clocks_each
         Dict[str, GK_Intermediate],  # clock_totals
     ]:
-        clock_totals = [
-            self.m.Intermediate(
+        clock_totals = {
+            recipe.name: self.m.Intermediate(
                 clock * self.clock_scale,
                 name=f'{recipe.name} clock total',
             )
             for recipe, clock in recipe_clocks
-        ]
+        }
 
-        clocks = [
-            self.m.Intermediate(
-                clock / self.buildings[recipe.name],
-                name=f'{recipe.name} clock each',
+        clocks = {
+            recipe: self.m.Intermediate(
+                clock / self.buildings[recipe],
+                name=f'{recipe} clock each',
             )
-            for clock, (recipe, _) in zip(clock_totals, recipe_clocks)
-        ]
+            for recipe, clock in clock_totals.items()
+        }
 
-        for clock in clocks:
+        for clock in clocks.values():
             self.m.Equation(clock <= 250)
 
-        return (
-            {
-                recipe.name: clock
-                for (recipe, _), clock in zip(recipe_clocks, clocks)
-            },
-            {
-                recipe.name: clock
-                for (recipe, _), clock in zip(recipe_clocks, clock_totals)
-            },
-        )
+        return clocks, clock_totals
 
     def define_shards(self) -> Tuple[
         Dict[str, GKVariable],
