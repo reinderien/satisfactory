@@ -4,7 +4,6 @@ from typing import Tuple, Dict
 from gekko.gk_operators import GK_Operators
 
 from .power import PowerSolver, ShardMode
-from .rates import setup_linprog, solve_linprog, get_clocks, get_rates
 from .recipe import load_recipes, graph_recipes
 
 
@@ -26,21 +25,17 @@ def graph_db():
 def multi_outputs():
     print('Factory to produce modular frames, rotors and smart plating, '
           'limited by building count, minimizing power')
-    recipes = load_recipes(TIERS_TO_5)
-    problem = setup_linprog(
-        recipes,
-        fixed_clocks={
-            'Modular Frame': 100,
-            'Rotor': 100,
-            'Smart Plating': 100,
-        }
-    )
-    solve_linprog(problem)
+    recipes = load_recipes({
+        'Tier 0', 'Tier 2',
+    })
 
-    with PowerSolver(recipes,
-                     percentages=dict(get_clocks(problem)),
-                     rates=dict(get_rates(problem))) as sol:
-        sol.constraints(sol.building_total <= 50)
+    with PowerSolver(recipes) as sol:
+        sol.constraints(
+            sol.clock_totals['Modular Frame'] >= 100,
+            sol.clock_totals['Rotor'] >= 100,
+            sol.clock_totals['Smart Plating'] >= 100,
+            sol.building_total <= 50,
+        )
         sol.minimize(sol.power_total)
         sol.solve()
         sol.print()

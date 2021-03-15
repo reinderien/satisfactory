@@ -1,6 +1,7 @@
 import enum
 import logging
 import math
+from collections import defaultdict
 from dataclasses import dataclass
 from enum import Enum
 from itertools import chain
@@ -96,7 +97,14 @@ class SolvedRecipe:
             '>'
         )
 
+    @property
+    def is_empty(self) -> bool:
+        return self.n < 1 or self.clock_total < 1
+
     def distribute(self) -> Tuple['SolvedRecipe', ...]:
+        if self.is_empty:
+            return ()
+
         clock = round(self.clock_total)
         quo, rem = divmod(clock, self.n)
         if not rem:
@@ -140,34 +148,18 @@ class PowerSolver:
     def __init__(
         self,
         recipes: Dict[str, 'Recipe'],
-        percentages: Dict[str, float],
-        rates: Dict[str, float],
-        scale_clock: bool = False,
         shard_mode: ShardMode = ShardMode.NONE,
     ):
         self.solved: List[SolvedRecipe] = []
-        self.recipes, self.rates, self.shard_mode = recipes, rates, shard_mode
+        self.recipes, self.shard_mode = recipes, shard_mode
 
-        recipe_clocks = [
-            (recipes[recipe], clock)
-            for recipe, clock in percentages.items()
-        ]
+        # No network
+        self.m = GEKKO(remote=False, name='satisfactory_power')
 
-        # No network; discontinuous problem; respect integer constraints
-        self.m = m = GEKKO(remote=False, name='satisfactory_power')
-
-        if scale_clock:
-            logger.warning('Scaling enabled; inexact solution likely')
-            self.clock_scale = m.Var(
-                name='clock_scale', value=1,
-            )
-            m.Equation(self.clock_scale > 0)
-        else:
-            self.clock_scale = m.Const(1, 'scale')
-
-        self.buildings, self.building_total = self.define_buildings(recipe_clocks)
-        self.powers, self.power_total = self.define_power(recipe_clocks)
-        self.clocks_each, self.clock_totals = self.define_clocks(recipe_clocks)
+        self.buildings, self.building_total = self.define_buildings()
+        self.clocks_each, self.clock_totals = self.define_clocks()
+        self.rates = self.define_rates()
+        self.powers, self.power_total = self.define_power()
 
         if shard_mode != ShardMode.NONE:
             self.shards_each, self.shard_totals, self.shard_total = self.define_shards()
@@ -178,18 +170,17 @@ class PowerSolver:
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.m.cleanup()
 
-    def define_buildings(self, recipe_clocks: List[Tuple['Recipe', float]]) -> Tuple[
+    def define_buildings(self) -> Tuple[
         Dict[str, GKVariable],
         GK_Intermediate,
     ]:
         buildings = {
-            recipe.name: self.m.Var(
-                name=f'{recipe.name} buildings',
+            recipe: self.m.Var(
+                name=f'{recipe} buildings',
                 integer=True,
-                lb=1,
-                value=max(1, clock//100),
+                lb=0,
             )
-            for recipe, clock in recipe_clocks
+            for recipe in self.recipes.keys()
         }
 
         return (
@@ -199,43 +190,17 @@ class PowerSolver:
             )
         )
 
-    def define_power(
-        self,
-        recipe_clocks: List[Tuple['Recipe', float]],
-    ) -> Tuple[
-        Dict[str, GK_Intermediate],
-        GK_Intermediate,
-    ]:
-        powers = {
-            recipe.name: self.m.Intermediate(
-                self.buildings[recipe.name]**-0.6
-                * (clock * self.clock_scale / 100)**1.6
-                * recipe.base_power,
-                name=f'{recipe.name} power'
-            )
-            for recipe, clock in recipe_clocks
-        }
-
-        return (
-            powers,
-            self.m.Intermediate(
-                pure_sum(powers.values()), name=f'power_total',
-            ),
-        )
-
-    def define_clocks(
-        self,
-        recipe_clocks: List[Tuple['Recipe', float]],
-    ) -> Tuple[
+    def define_clocks(self) -> Tuple[
         Dict[str, GK_Intermediate],  # clocks_each
         Dict[str, GK_Intermediate],  # clock_totals
     ]:
         clock_totals = {
-            recipe.name: self.m.Intermediate(
-                clock * self.clock_scale,
-                name=f'{recipe.name} clock total',
+            recipe: self.m.Var(
+                name=f'{recipe} clock total',
+                integer=True,
+                lb=0,
             )
-            for recipe, clock in recipe_clocks
+            for recipe in self.recipes.keys()
         }
 
         clocks = {
@@ -250,6 +215,49 @@ class PowerSolver:
             self.m.Equation(clock <= 250)
 
         return clocks, clock_totals
+
+    def define_rates(self) -> Dict[str, GK_Intermediate]:
+        rates = defaultdict(list)
+
+        for recipe in self.recipes.values():
+            clock = self.clock_totals[recipe.name] / 100
+
+            for resource, rate in recipe.rates.items():
+                rates[resource].append(clock * rate)
+
+        rate_totals = {
+            name: self.m.Intermediate(
+                pure_sum(rate_list),
+                name=f'{name} rate',
+            )
+            for name, rate_list in rates.items()
+        }
+
+        for rate in rate_totals.values():
+            self.m.Equation(rate >= -0.01)
+
+        return rate_totals
+
+    def define_power(self) -> Tuple[
+        Dict[str, GK_Intermediate],
+        GK_Intermediate,
+    ]:
+        powers = {
+            recipe: self.m.Intermediate(
+                self.buildings[recipe]**-0.6 *
+                (clock / 100)**1.6
+                * self.recipes[recipe].base_power,
+                name=f'{recipe} power'
+            )
+            for recipe, clock in self.clock_totals.items()
+        }
+
+        return (
+            powers,
+            self.m.Intermediate(
+                pure_sum(powers.values()), name=f'power_total',
+            ),
+        )
 
     def define_shards(self) -> Tuple[
         Dict[str, GKVariable],
@@ -387,13 +395,6 @@ class PowerSolver:
             logger.warning('ShardMode.BINARY risks this solution being non-optimal')
 
     @property
-    def clock_scale_value(self) -> float:
-        v = self.clock_scale.value
-        if isinstance(self.clock_scale, GKVariable):
-            return v[0]
-        return v
-
-    @property
     def actual_power(self) -> float:
         return sum(s.power_total for s in self.solved)
 
@@ -413,6 +414,9 @@ class PowerSolver:
         )
 
         for s in self.solved:
+            if s.is_empty:
+                continue
+
             print(
                 f'{s.recipe.name:>45} '
                 f'{s.clock_each:>5.0f} '
@@ -421,7 +425,7 @@ class PowerSolver:
                 f'{s.power_each / 1e6:>6.2f} {s.power_total / 1e6:>6.2f} '
                 f'{s.shards_each:>6} {s.shards_total:>3} '
                 f'{s.secs_per_output_each:>5.1f} {s.secs_per_output_total:>5.1f} '
-                f'{s.recipe.secs_per_extra(self.rates, self.clock_scale_value):>7}'
+                f'{s.recipe.secs_per_extra(self.rates):>7}'
             )
 
         if self.shard_mode == ShardMode.NONE:
@@ -449,7 +453,10 @@ class PowerSolver:
 
         # Eventually we will need splitter and merger nodes - todo
         # but for now make intermediate resource-routing nodes
-        building_indices = tuple(enumerate(self.solved))
+        building_indices = tuple(enumerate(
+            s for s in self.solved
+            if not s.is_empty
+        ))
         for i, solved in building_indices:
             dot.node(
                 name=str(i),
@@ -459,7 +466,7 @@ class PowerSolver:
 
         resources = {
             resource
-            for solved in self.solved
+            for i, solved in building_indices
             for resource in solved.recipe.rates.keys()
         }
         res_by_name = {

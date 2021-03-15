@@ -1,6 +1,8 @@
 import pickle
 import re
 from dataclasses import dataclass
+
+from gekko.gk_operators import GK_Intermediate
 from graphviz import Digraph
 from itertools import count, chain
 from pathlib import Path
@@ -216,8 +218,8 @@ class Recipe:
                 },
             )
 
-    def secs_per_extra(self, rates: Dict[str, float], clock_scale: float) -> str:
-        rate = rates[self.first_output] * clock_scale
+    def secs_per_extra(self, rates: Dict[str, GK_Intermediate]) -> str:
+        rate, = rates[self.first_output]
         if rate < 1e-6:
             return '∞'
         return f'{1 / rate:.1f}'
