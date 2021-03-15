@@ -144,20 +144,74 @@ class ShardMode(Enum):
         raise NotImplementedError()
 
 
+def prune_recipes(
+    recipes: Dict[str, 'Recipe'], initial_recipes: Dict[str, float],
+) -> Tuple[
+    Dict[str, 'Recipe'],  # pruned recipes
+    Dict[str, float],  # initial clocks
+]:
+    recipes_by_resource = defaultdict(list)
+    for recipe_name, recipe in recipes.items():
+        for resource, rate in recipe.rates.items():
+            recipes_by_resource[resource].append((recipe, rate))
+
+    initial_rates = defaultdict(float)
+    initial_clocks = defaultdict(int)
+
+    def recurse_initial(recipe_name, clock: float):
+        initial_clocks[recipe_name] += clock
+
+        for resource, rate in recipes[recipe_name].rates.items():
+            initial_rates[resource] += rate * clock/100
+
+            if rate < 0 and initial_rates[resource] < 0:
+                outputs = [
+                    (recipe, rate)
+                    for recipe, rate in recipes_by_resource[resource]
+                    if rate > 0
+                ]
+                n_outputs = len(outputs)
+                rate_per = -initial_rates[resource] / n_outputs
+
+                # Each output needs to contribute equally to the solution
+                # e.g. for output rates of 0.5, 1, 2 /s,
+                # and a needed total rate of 32.455 /s,
+                # each needs to contribute 10.818 /s
+
+                for recipe, rate in outputs:
+                    recurse_initial(
+                        recipe.name,
+                        math.ceil(rate_per / rate * 100),
+                    )
+
+    for recipe, clock in initial_recipes.items():
+        recurse_initial(recipe, clock)
+
+    pruned_recipes = {
+        recipe: recipes[recipe]
+        for recipe, clock in initial_clocks.items()
+        if clock > 1e-3
+    }
+    logger.info(f'Kept {len(pruned_recipes)}/{len(recipes)} recipes')
+    return pruned_recipes, initial_clocks
+
+
 class PowerSolver:
     def __init__(
         self,
         recipes: Dict[str, 'Recipe'],
+        initial_recipes: Dict[str, float],
         shard_mode: ShardMode = ShardMode.NONE,
     ):
         self.solved: List[SolvedRecipe] = []
-        self.recipes, self.shard_mode = recipes, shard_mode
+        self.shard_mode = shard_mode
+        self.recipes, initial_clocks = prune_recipes(recipes, initial_recipes)
 
         # No network
         self.m = GEKKO(remote=False, name='satisfactory_power')
 
-        self.buildings, self.building_total = self.define_buildings()
-        self.clocks_each, self.clock_totals = self.define_clocks()
+        self.buildings, self.building_total = self.define_buildings(initial_clocks)
+        self.clocks_each, self.clock_totals = self.define_clocks(initial_clocks)
         self.rates = self.define_rates()
         self.powers, self.power_total = self.define_power()
 
@@ -170,7 +224,8 @@ class PowerSolver:
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.m.cleanup()
 
-    def define_buildings(self) -> Tuple[
+    def define_buildings(self,
+        initial_clocks: Dict[str, float],) -> Tuple[
         Dict[str, GKVariable],
         GK_Intermediate,
     ]:
@@ -178,7 +233,11 @@ class PowerSolver:
             recipe: self.m.Var(
                 name=f'{recipe} buildings',
                 integer=True,
-                lb=0,
+                # This has to be at least one to avoid dividing by zero during
+                # power calculation. It's still possible to have a zero-
+                # throughput recipe with a clock of zero.
+                lb=1,
+                value=math.ceil(initial_clocks.get(recipe, 0)/100),
             )
             for recipe in self.recipes.keys()
         }
@@ -190,18 +249,21 @@ class PowerSolver:
             )
         )
 
-    def define_clocks(self) -> Tuple[
+    def define_clocks(self,
+        initial_clocks: Dict[str, float],) -> Tuple[
         Dict[str, GK_Intermediate],  # clocks_each
         Dict[str, GK_Intermediate],  # clock_totals
     ]:
-        clock_totals = {
-            recipe: self.m.Var(
+        clock_totals = {}
+
+        for recipe in self.recipes.keys():
+            initial = initial_clocks.get(recipe, 0)
+            var = self.m.Var(
                 name=f'{recipe} clock total',
                 integer=True,
-                lb=0,
+                lb=0, value=initial,
             )
-            for recipe in self.recipes.keys()
-        }
+            clock_totals[recipe] = var
 
         clocks = {
             recipe: self.m.Intermediate(

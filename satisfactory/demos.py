@@ -29,7 +29,12 @@ def multi_outputs():
         'Tier 0', 'Tier 2',
     })
 
-    with PowerSolver(recipes) as sol:
+    with PowerSolver(recipes,
+                     initial_recipes={
+                         'Modular Frame': 100,
+                         'Rotor': 100,
+                         'Smart Plating': 100,
+                     }) as sol:
         sol.constraints(
             sol.clock_totals['Modular Frame'] >= 100,
             sol.clock_totals['Rotor'] >= 100,
@@ -47,19 +52,16 @@ def hungry_plating():
           'minimizing the number of buildings, which implies huge power '
           'consumption and shards')
     recipes = load_recipes(TIERS_TO_5)
-    problem = setup_linprog(recipes,
-                            min_rates={'Smart Plating': 0.1})
-    solve_linprog(problem)
 
     with PowerSolver(recipes,
-                     percentages=dict(get_clocks(problem)),
-                     rates=dict(get_rates(problem)),
+                     initial_recipes={'Smart Plating': 100},
                      # We care about shards, so this can't be NONE; but also
                      # BINARY produces a non-optimal solution
                      shard_mode=ShardMode.MPEC) as power:
         power.constraints(power.building_total <= 50,
                           power.shard_total <= 24,  # limiting factor
-                          power.power_total <= 500e6)
+                          power.power_total <= 500e6,
+                          power.rates['Smart Plating'] >= 0.1)
         power.minimize(power.building_total)
         power.solve()
         power.print()
@@ -68,80 +70,50 @@ def hungry_plating():
 
 def fast_rotors():
     print('Factory to produce as many rotors as possible, limited by power and '
-          'building count, via two-stage approximate scaling')
+          'building count')
     recipes = load_recipes(TIERS_TO_5)
-    problem = setup_linprog(recipes,
-                            fixed_clocks={'Rotor': 100})
-    solve_linprog(problem)
 
     with PowerSolver(recipes,
-                     percentages=dict(get_clocks(problem)),
-                     rates=dict(get_rates(problem)),
-                     scale_clock=True) as approx:
-        approx.constraints(approx.building_total <= 25,
-                           approx.power_total <= 100e6)
-        approx.maximize(approx.clock_totals['Rotor'])
-        approx.solve()
-
-    print('\nRefined:')
-    problem = setup_linprog(
-        recipes,
-        fixed_clocks={
-            'Rotor': round(approx.clock_totals['Rotor'][0]),
-        }
-    )
-    solve_linprog(problem)
-
-    with PowerSolver(recipes,
-                     percentages=dict(get_clocks(problem)),
-                     rates=dict(get_rates(problem))) as exact:
-        exact.constraints(exact.building_total <= 25)
-        exact.minimize(exact.power_total)
-        exact.solve()
-        exact.print()
-        exact.graph()
+                     initial_recipes={'Rotor': 100}) as power:
+        power.constraints(power.building_total <= 25,
+                          power.power_total <= 100e6)
+        power.maximize(power.clock_totals['Rotor'])
+        power.solve()
+        power.print()
+        power.graph()
 
 
 def big_tier_4():
     print('Factory to produce a collection of tier-4 resources, limited by '
           'power and building count')
 
+    outputs = {
+        'A.I. Limiter': 25,
+        'Automated Wiring': 25,
+        'Motor': 25,
+        'Quartz Crystal': 25,
+        'Smart Plating': 25,
+        'Versatile Framework': 25,
+    }
+    output_names = tuple(outputs.keys())
+
     recipes = load_recipes(TIERS_TO_5)
-    problem = setup_linprog(recipes,
-                            min_clocks={
-                                'A.I. Limiter': 100,
-                                'Automated Wiring': 100,
-                                'Motor': 100,
-                                'Quartz Crystal': 100,
-                                'Smart Plating': 100,
-                                'Versatile Framework': 100,
-                            })
-    solve_linprog(problem)
 
     with PowerSolver(recipes,
-                     percentages=dict(get_clocks(problem)),
-                     rates=dict(get_rates(problem)),
-                     scale_clock=True) as approx:
-        approx.constraints(approx.building_total <= 100,
-                           approx.power_total <= 375e6)
-        approx.maximize(approx.clock_totals['Automated Wiring'])
-        approx.solve()
-
-    print('\nRefined:')
-    problem = setup_linprog(
-        recipes,
-        min_clocks={solved.recipe.name: round(solved.clock_total)
-                    for solved in approx.solved})
-    solve_linprog(problem)
-
-    with PowerSolver(recipes,
-                     percentages=dict(get_clocks(problem)),
-                     rates=dict(get_rates(problem))) as exact:
-        exact.constraints(exact.building_total <= 100)
-        exact.minimize(exact.power_total)
-        exact.solve()
-        exact.print()
-        exact.graph()
+                     initial_recipes=outputs) as power:
+        power.constraints(
+            power.building_total <= 100,
+            power.power_total <= 375e6,
+            *(
+                power.clock_totals[output_names[i]] ==
+                power.clock_totals[output_names[i + 1]]
+                for i in range(len(outputs) - 1)
+            ),
+        )
+        power.maximize(power.clock_totals['Automated Wiring'])
+        power.solve()
+        power.print()
+        power.graph()
 
 
 def current():
@@ -152,19 +124,30 @@ def current():
             power.building_total <= 100,
             power.power_total <= 300e6,
             # power.shard_total <= 94,
+            power.buildings['Iron Ore from Miner Mk.1 on Pure node'] +
             power.buildings['Iron Ore from Miner Mk.2 on Pure node'] == 3,
+            power.buildings['Copper Ore from Miner Mk.1 on Pure node'] +
             power.buildings['Copper Ore from Miner Mk.2 on Pure node'] == 1,
+            power.buildings['Caterium Ore from Miner Mk.1 on Pure node'] +
             power.buildings['Caterium Ore from Miner Mk.2 on Pure node'] == 1,
         )
 
     recipes = load_recipes(TIERS_TO_5)
 
+    min_rates = {
+        'A.I. Limiter': 0.1,
+        'Encased Industrial Beam': 0.1,
+        'Motor': 0.1,
+        'Versatile Framework': 0.1,
+    }
+
     @contextmanager
-    def solve(problem, **kwargs):
-        solve_linprog(problem)
+    def solve(**kwargs):
         with PowerSolver(recipes,
-                         percentages=dict(get_clocks(problem)),
-                         rates=dict(get_rates(problem)),
+                         initial_recipes={
+                            name: 100
+                            for name, rate in min_rates.items()
+                         },
                          **kwargs) as power:
             power.constraints(*constraints(power))
             yield power
@@ -174,13 +157,6 @@ def current():
         return {solved.recipe.name: round(solved.clock_total)
                 for solved in power.solved}
 
-    min_rates = {
-        'A.I. Limiter': 0.1,
-        'Encased Industrial Beam': 0.1,
-        'Heavy Modular Frame': 0.1,
-        'Motor': 0.1,
-        'Versatile Framework': 0.1,
-    }
     fixed_clocks = None
 
     best_rate = 0
@@ -188,29 +164,16 @@ def current():
 
     for i in range(3):
         print(f'\nIteration {i}', file=stderr)
-
-        print('\nScale clocks, maximize throughput', file=stderr)
         stderr.flush()
         with solve(
-            setup_linprog(
-                recipes,
-                min_rates=min_rates,
-                min_clocks=fixed_clocks,
-            ),
             # shard_mode=ShardMode.BINARY,
-            scale_clock=True,
         ) as approx:
             approx.maximize(approx.clock_totals['Versatile Framework'])
 
         min_rates = None
         print('\nExact, minimize buildings', file=stderr)
         stderr.flush()
-        with solve(
-            setup_linprog(
-                recipes,
-                min_clocks=round_clocks(approx),
-            ),
-        ) as exact:
+        with solve() as exact:
             exact.minimize(exact.power_total)
 
         delay = next(
