@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from enum import Enum
 from itertools import chain
 from numbers import Number
-from typing import Dict, Iterable, List, Tuple, TYPE_CHECKING
+from typing import Dict, Iterable, List, Tuple
 
 from gekko import GEKKO
 from gekko.gk_operators import GK_Intermediate, GK_Operators
@@ -14,9 +14,8 @@ from gekko.gk_variable import GKVariable
 from graphviz import Digraph
 
 from .logs import logger
+from .recipe import Recipe, prune_recipes
 
-if TYPE_CHECKING:
-    from .recipe import Recipe
 
 """
 At this point, we have a total percentage for each recipe, but no choice
@@ -55,21 +54,16 @@ class SolvedRecipe:
         return self.clock_total // self.n
 
     @property
-    def power_each(self) -> float:
-        return self.recipe.base_power * (self.clock_each / 100) ** 1.6
-
-    @property
-    def power_total(self) -> float:
-        return self.power_each * self.n
-
-    @property
     def secs_per_output_each(self) -> float:
         return self.secs_per_output_total * self.n
 
+    def rate(self, resource: str) -> float:
+        rate = self.recipe.rates[resource]
+        return rate.scaled_rate(self.clock_each) / self.n
+
     @property
     def secs_per_output_total(self) -> float:
-        rate = self.clock_total / 100 * self.recipe.rates[self.recipe.first_output]
-        return 1 / rate
+        return 1 / self.rate(self.recipe.first_output)
 
     @property
     def shards_each(self) -> int:
@@ -144,58 +138,6 @@ class ShardMode(Enum):
         raise NotImplementedError()
 
 
-def prune_recipes(
-    recipes: Dict[str, 'Recipe'], initial_recipes: Dict[str, float],
-) -> Tuple[
-    Dict[str, 'Recipe'],  # pruned recipes
-    Dict[str, float],  # initial clocks
-]:
-    recipes_by_resource = defaultdict(list)
-    for recipe_name, recipe in recipes.items():
-        for resource, rate in recipe.rates.items():
-            recipes_by_resource[resource].append((recipe, rate))
-
-    initial_rates = defaultdict(float)
-    initial_clocks = defaultdict(int)
-
-    def recurse_initial(recipe_name, clock: float):
-        initial_clocks[recipe_name] += clock
-
-        for resource, rate in recipes[recipe_name].rates.items():
-            initial_rates[resource] += rate * clock/100
-
-            if rate < 0 and initial_rates[resource] < 0:
-                outputs = [
-                    (recipe, rate)
-                    for recipe, rate in recipes_by_resource[resource]
-                    if rate > 0
-                ]
-                n_outputs = len(outputs)
-                rate_per = -initial_rates[resource] / n_outputs
-
-                # Each output needs to contribute equally to the solution
-                # e.g. for output rates of 0.5, 1, 2 /s,
-                # and a needed total rate of 32.455 /s,
-                # each needs to contribute 10.818 /s
-
-                for recipe, rate in outputs:
-                    recurse_initial(
-                        recipe.name,
-                        math.ceil(rate_per / rate * 100),
-                    )
-
-    for recipe, clock in initial_recipes.items():
-        recurse_initial(recipe, clock)
-
-    pruned_recipes = {
-        recipe: recipes[recipe]
-        for recipe, clock in initial_clocks.items()
-        if clock > 1e-3
-    }
-    logger.info(f'Kept {len(pruned_recipes)}/{len(recipes)} recipes')
-    return pruned_recipes, initial_clocks
-
-
 class PowerSolver:
     def __init__(
         self,
@@ -213,7 +155,6 @@ class PowerSolver:
         self.buildings, self.building_total = self.define_buildings(initial_clocks)
         self.clocks_each, self.clock_totals = self.define_clocks(initial_clocks)
         self.rates = self.define_rates()
-        self.powers, self.power_total = self.define_power()
 
         if shard_mode != ShardMode.NONE:
             self.shards_each, self.shard_totals, self.shard_total = self.define_shards()
@@ -282,10 +223,12 @@ class PowerSolver:
         rates = defaultdict(list)
 
         for recipe in self.recipes.values():
-            clock = self.clock_totals[recipe.name] / 100
+            clock = self.clocks_each[recipe.name]
 
             for resource, rate in recipe.rates.items():
-                rates[resource].append(clock * rate)
+                rates[resource].append(
+                    self.buildings[recipe.name] * rate.scaled_rate(clock)
+                )
 
         rate_totals = {
             name: self.m.Intermediate(
@@ -299,27 +242,6 @@ class PowerSolver:
             self.m.Equation(rate >= -0.01)
 
         return rate_totals
-
-    def define_power(self) -> Tuple[
-        Dict[str, GK_Intermediate],
-        GK_Intermediate,
-    ]:
-        powers = {
-            recipe: self.m.Intermediate(
-                self.buildings[recipe]**-0.6 *
-                (clock / 100)**1.6
-                * self.recipes[recipe].base_power,
-                name=f'{recipe} power'
-            )
-            for recipe, clock in self.clock_totals.items()
-        }
-
-        return (
-            powers,
-            self.m.Intermediate(
-                pure_sum(powers.values()), name=f'power_total',
-            ),
-        )
 
     def define_shards(self) -> Tuple[
         Dict[str, GKVariable],
@@ -398,7 +320,7 @@ class PowerSolver:
         logger.info(
             f'Solved for '
             f'buildings={self.building_total[0]:.1f} '
-            f'power={self.power_total[0]/1e6:.1f}MW '
+            f'power={self.power_total[0]:.1f}MW '
             f'shards={self.actual_shards}'
         )
 
@@ -470,7 +392,6 @@ class PowerSolver:
             f'{"Clock":5} '
             f'{"n":>3} '
 
-            f'{"P (MW)":>6} {"tot":>6} '
             f'{"shards":>6} {"tot":>3} '
             f'{"s/out":>5} {"tot":>5} {"s/extra":>7}'
         )
@@ -484,7 +405,6 @@ class PowerSolver:
                 f'{s.clock_each:>5.0f} '
                 f'{s.n:>3} '
 
-                f'{s.power_each / 1e6:>6.2f} {s.power_total / 1e6:>6.2f} '
                 f'{s.shards_each:>6} {s.shards_total:>3} '
                 f'{s.secs_per_output_each:>5.1f} {s.secs_per_output_total:>5.1f} '
                 f'{s.recipe.secs_per_extra(self.rates):>7}'
@@ -498,12 +418,10 @@ class PowerSolver:
         print(
             f'{"Total approx":>45} '
             f'{"":5} {"":>3} '
-            f'{"":6} {self.power_total.value[0] / 1e6:>6.2f} '
             f'{"":6} {shards:>3}\n'
             
             f'{"Total actual":>45} '
             f'{"":5} {round(self.building_total.value[0]):>3} '
-            f'{"":6} {self.actual_power / 1e6:>6.2f} '
             f'{"":6} {self.actual_shards:>3}'
         )
 
@@ -545,11 +463,10 @@ class PowerSolver:
         for i_building, solved in building_indices:
             for resource, rate in solved.recipe.rates.items():
                 source, dest = i_building, res_by_name[resource]
-                if rate < 0:  # input
+                if rate.is_input:  # input
                     source, dest = dest, source
-                    rate = -rate
 
-                throughput = rate * solved.clock_total/100
+                throughput = solved.n * rate.scaled_rate(solved.clock_each)
 
                 dot.edge(
                     tail_name=str(source),

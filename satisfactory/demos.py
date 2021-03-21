@@ -7,18 +7,20 @@ from .power import PowerSolver, ShardMode
 from .recipe import load_recipes, graph_recipes
 
 
-TIERS_TO_5 = {
+TIERS_TO_6 = {
     'Tier 0',
     'Tier 1',
     'Tier 2',
     'Tier 3',
     'Tier 4',
+    'Tier 5',
+    'Tier 6',
     'M.A.M.',
 }
 
 
 def graph_db():
-    recipes = load_recipes(TIERS_TO_5)
+    recipes = load_recipes(TIERS_TO_6)
     graph_recipes(recipes)
 
 
@@ -41,7 +43,7 @@ def multi_outputs():
             sol.clock_totals['Smart Plating'] >= 100,
             sol.building_total <= 50,
         )
-        sol.minimize(sol.power_total)
+        sol.minimize(sol.building_total)
         sol.solve()
         sol.print()
         sol.graph()
@@ -51,7 +53,7 @@ def hungry_plating():
     print('Factory to produce smart plating at at least 1 every 10s, '
           'minimizing the number of buildings, which implies huge power '
           'consumption and shards')
-    recipes = load_recipes(TIERS_TO_5)
+    recipes = load_recipes(TIERS_TO_6)
 
     with PowerSolver(recipes,
                      initial_recipes={'Smart Plating': 100},
@@ -71,7 +73,7 @@ def hungry_plating():
 def fast_rotors():
     print('Factory to produce as many rotors as possible, limited by power and '
           'building count')
-    recipes = load_recipes(TIERS_TO_5)
+    recipes = load_recipes(TIERS_TO_6)
 
     with PowerSolver(recipes,
                      initial_recipes={'Rotor': 100}) as power:
@@ -97,7 +99,7 @@ def big_tier_4():
     }
     output_names = tuple(outputs.keys())
 
-    recipes = load_recipes(TIERS_TO_5)
+    recipes = load_recipes(TIERS_TO_6)
 
     with PowerSolver(recipes,
                      initial_recipes=outputs) as power:
@@ -122,7 +124,7 @@ def current():
     def constraints(power) -> Tuple[GK_Operators, ...]:
         return (
             power.building_total <= 100,
-            power.power_total <= 300e6,
+            power.rates['Power'] > 10,
             # power.shard_total <= 94,
             power.buildings['Iron Ore from Miner Mk.1 on Pure node'] +
             power.buildings['Iron Ore from Miner Mk.2 on Pure node'] == 3,
@@ -132,7 +134,7 @@ def current():
             power.buildings['Caterium Ore from Miner Mk.2 on Pure node'] == 1,
         )
 
-    recipes = load_recipes(TIERS_TO_5)
+    recipes = load_recipes(TIERS_TO_6)
 
     min_rates = {
         'A.I. Limiter': 0.1,

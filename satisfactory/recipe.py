@@ -1,89 +1,52 @@
+import math
 import pickle
 import re
+from collections import defaultdict
 from dataclasses import dataclass
-
 from gekko.gk_operators import GK_Intermediate
+
 from graphviz import Digraph
 from itertools import count, chain
 from pathlib import Path
-from typing import ClassVar, Collection, Dict, Iterable, List, Pattern, Set, Tuple
+from typing import ClassVar, Dict, Iterable, Pattern, Set, Collection, Optional, Callable, Tuple
 
 from requests import Session
 
 from .logs import logger
+from .mediawiki import parse_template, get_api, fetch_recipes, fetch_powers
 
 
-MAX_RECIPES = 50
+@dataclass
+class Rate:
+    resource: str
+    time: float
+    quantity: float
+    exp: float = 1
 
+    @property
+    def rate(self) -> float:
+        return self.quantity / self.time
 
-class MediaWikiError(Exception):
-    pass
+    def scaled_rate(self, clock: int) -> float:
+        scale = clock / 100
+        if False:  # not self.is_linear:
+            scale **= self.exp
+        return scale * self.rate
 
+    def clock_for_rate(self, rate: float) -> float:
+        return (rate/self.rate) ** (1/self.exp) * 100
 
-def get_api(session: Session, **kwargs) -> Iterable[Tuple[str, str]]:
-    params = {
-        'action': 'query',
-        'prop': 'revisions',
-        'rvprop': 'content',
-        'rvslots': '*',
-        'format': 'json',
-        **kwargs,
-    }
+    @property
+    def is_input(self) -> bool:
+        return self.rate < 0
 
-    while True:
-        with session.get(
-            'https://satisfactory.gamepedia.com/api.php', params=params,
-        ) as resp:
-            resp.raise_for_status()
-            data = resp.json()
+    @property
+    def is_output(self) -> bool:
+        return self.rate > 0
 
-        warnings = data.get('warnings')
-        if warnings:
-            for title, entries in warnings.items():
-                for warning in entries.values():
-                    logger.warning(f'%s: %s', title, warning)
-
-        error = data.get('error')
-        if error:
-            raise MediaWikiError(
-                f'{error["code"]}: {error["info"]}'
-            )
-
-        for page in data['query']['pages'].values():
-            revisions = page.get('revisions')
-            if revisions is None and 'missing' in page:
-                logger.warning(f'Page "{page["title"]}" missing')
-            else:
-                revision, = revisions
-                yield page['title'], revision['slots']['main']['*']
-
-        if 'batchcomplete' in data:
-            break
-
-        params.update(data['continue'])
-
-
-def parse_template(content: str, tiers: Set[str]) -> List[str]:
-    start = content.index('\n| group2     = Components\n')
-    end = content.index(f'\n}}', start)
-    content = content[start: end]
-
-    for tier_start in re.finditer(
-        r'^   \| group\d = \[\[(.+)\]\]$', content, re.M,
-    ):
-        tier_name = tier_start[1]
-        if tier_name not in tiers:
-            continue
-
-        tier_index = tier_start.end() + 1
-        list_content = content[tier_index: content.find('\n', tier_index)]
-
-        for name in re.finditer(
-            r'(?<={{ItemLink\|)'
-            r'[^|\}]+',
-            list_content,
-        ):
-            yield name[0]
+    @property
+    def is_linear(self) -> bool:
+        return self.exp == 1
 
 
 @dataclass
@@ -92,37 +55,61 @@ class Recipe:
     crafted_in: str
     tier: str
     time: float
+    rates: Dict[str, Rate]
 
-    rates: Dict[str, float]
-
-    _parse_re: ClassVar[Pattern] = re.compile(
-        r'{{CraftingTable(.+?)}}', re.I | re.S,
+    _attr_re: ClassVar[Pattern] = re.compile(
+        r'^'
+        r' *\|'
+        r' *([^|=]+?)'
+        r' *='
+        r' *(.*?)'
+        r' *$',
+        re.M,
     )
-
-    base_power: float = None
 
     @property
     def first_output(self) -> str:
         return next(
             resource
             for resource, rate in self.rates.items()
-            if rate > 0
+            if rate.is_output
         )
 
     def __str__(self):
         return self.name
 
     @classmethod
-    def get_attrs(cls, page: str) -> Iterable[Dict[str, str]]:
-        for match in cls._parse_re.finditer(page):
-            recipe = match[1]
-            yield dict(
-                tuple(elm.strip() for elm in kv.split('='))
-                for kv in recipe.split('|')[1:]
-            )
+    def get_attrs(cls, page: str, box_name: str) -> Iterable[Dict[str, str]]:
+        parse = (
+            r'{{' + re.escape(box_name) +
+            r'(.+?)\n'
+            r'}}'
+        )
 
+        for match in re.finditer(parse, page, re.I | re.S):
+            recipe = match[1]
+            d = dict(
+                m.groups()
+                for m in cls._attr_re.finditer(recipe)
+            )
+            yield d
+
+    def secs_per_extra(self, rates: Dict[str, GK_Intermediate]) -> str:
+        rate, = rates[self.first_output]
+        if rate < 1e-6:
+            return '∞'
+        return f'{1 / rate:.1f}'
+
+    @property
+    def building_name(self) -> str:
+        if 'Miner' in self.crafted_in:
+            return self.name.split('from ')[1]
+        return self.crafted_in
+
+
+class ProductionRecipe(Recipe):
     @classmethod
-    def from_component_page(cls, page: str) -> Iterable['Recipe']:
+    def from_page(cls, page: str) -> Iterable['ProductionRecipe']:
         """
         {{CraftingTable
         | product = Cable
@@ -138,19 +125,28 @@ class Recipe:
         }}
         """
 
-        for attrs in cls.get_attrs(page):
+        for attrs in cls.get_attrs(page, 'CraftingTable'):
             if attrs.get('alternateRecipe') == '1':
                 continue
 
             t = float(attrs['craftingTime'])
+            name = attrs['product']
             rates = {
-                attrs['product']: float(attrs['productCount']) / t,
+                name: Rate(
+                    resource=name,
+                    quantity=float(attrs['productCount']),
+                    time=t,
+                )
             }
 
             for i in count(1):
                 name = attrs.get(f'ingredient{i}')
                 if name:
-                    rates[name] = -float(attrs[f'quantity{i}']) / t
+                    rates[name] = Rate(
+                        resource=name,
+                        quantity=-float(attrs[f'quantity{i}']),
+                        time=t,
+                    )
                 else:
                     break
 
@@ -162,8 +158,14 @@ class Recipe:
                 rates=rates,
             )
 
+
+@dataclass
+class OreRecipe(Recipe):
+    mark: int
+    purity: str
+
     @classmethod
-    def from_ore_page(cls, page: str) -> Iterable['Recipe']:
+    def from_page(cls, page: str) -> Iterable['OreRecipe']:
         if not any(
             ore_str in page
             for ore_str in (
@@ -193,131 +195,196 @@ class Recipe:
         Pure	120	240	480
         '''
 
-        attrs = next(cls.get_attrs(page))
+        attrs = next(cls.get_attrs(page, 'CraftingTable'))
+        resource = attrs['recipeName']
+        t = float(attrs['craftingTime'])
+        quantity = float(attrs['productCount'])
 
-        for mark, purity, rate in (
-                (1, 'Impure', 0.5),
-                (1, 'Normal', 1.0),
-                (1, 'Pure', 2.0),
-                (2, 'Impure', 1.0),
-                (2, 'Normal', 2.0),
-                (2, 'Pure', 4.0),
-                (3, 'Impure', 2.0),
-                (3, 'Normal', 4.0),
-                (3, 'Pure', 8.0),
+        for purity_name, purity_mod in (
+            ('Impure', 0.5),
+            ('Normal', 1.0),
+            ('Pure',   2.0),
         ):
-            crafted_in = f'{attrs["craftedIn"]} Mk.{mark}'
-            yield cls(
-                name=f'{attrs["recipeName"]} from '
-                     f'{crafted_in} on {purity} node',
-                crafted_in=crafted_in,
+            for mark, mark_mod in (
+                (1, 1),
+                (2, 2),
+                (3, 4),
+            ):
+                crafted_in = f'{attrs["craftedIn"]} Mk.{mark}'
+                rate = purity_mod * mark_mod
+                final_t = t/rate
+
+                yield cls(
+                    mark=mark,
+                    purity=purity_name,
+                    name=f'{resource} from {crafted_in} '
+                         f'on {purity_name} node',
+                    crafted_in=crafted_in,
+                    tier=attrs['researchTier'],
+                    time=final_t,
+                    rates={
+                        attrs['product']: Rate(
+                            resource=resource,
+                            quantity=quantity,
+                            time=final_t,
+                        ),
+                    },
+                )
+
+
+class GeneratorRecipe(Recipe):
+    _fuel_re: ClassVar[Pattern] = re.compile(
+        r'(?<=\[\[)'
+        r'.+?'
+        r'(?=\]\])'
+    )
+
+    def for_coal(page: str) -> Iterable[Tuple[str, float]]:
+        """
+        {| class="wikitable"
+        ! Fuel type !! Energy (MJ) !! Stack size !! '''Stack energy (MJ)''' !! Burn time (sec) !! '''Items per minute'''
+        |-
+        | {{ItemLink|Coal}} || 300 || 100 || 30,000 || 4 || 15
+        |-
+        | {{ItemLink|Compacted Coal}} || 630 || 100 || 63,000 || 8.4 || 7.143
+        |-
+        | {{ItemLink|Petroleum Coke}} || 180 || 200 || 36,000 || 2.4 || 25
+        |}
+        """
+
+        start = 0
+        prefix = '{| class="wikitable"\n'
+        cap_re = re.compile(
+            r"!+ *'*"
+            r"([^!']+?)"
+            r" *(!|'|$)"
+        )
+
+        while True:
+            cap_start = page.index(prefix, start) + len(prefix)
+            cap_end = page.index('\n', cap_start)
+            cap_line = page[cap_start: cap_end]
+            caps = [m[1] for m in cap_re.finditer(cap_line)]
+            start = 1 + cap_end
+            if caps[0] == 'Fuel type':
+                break
+
+        sep = '|-\n'
+        while page[start: start + len(sep)] == sep:
+            # | {{ItemLink|Coal}} || 300 || 100 || 30,000 || 4 || 15
+            start += len(sep)
+            line_end = page.find('\n', start)
+            line = page[start+1: line_end]
+            items = [i.strip() for i in line.split('||')]
+
+            attrs = dict(zip(caps, items))
+            name = attrs['Fuel type'].split('|', 1)[1].split('}', 1)[0]
+            energy = float(attrs['Energy (MJ)'])
+            yield name, energy
+
+            start = 1 + line_end
+
+    def for_fuel(page: str) -> Iterable[Tuple[str, float]]:
+        """
+        === {{ItemLink|Fuel}} (600 MJ/m{{cubic}}) ===
+        """
+
+        for match in re.finditer(
+            r'=== {{ItemLink\|'
+            r'([^|}{]+)'
+            r'}} \('
+            r'([0-9,]+)'
+            r' MJ/m',
+            page,
+        ):
+            yield match[1], float(match[2].replace(',', ''))
+
+    parse_by_gen: ClassVar[Dict[str, Callable]] = {
+        'Coal Generator': for_coal,
+        'Fuel Generator': for_fuel,
+    }
+
+    @classmethod
+    def from_page(cls, name: str, page: str, tiers: Set[str]) -> Iterable['GeneratorRecipe']:
+        if (
+            name in {
+                'Biomass Burner',  # manual feed only
+                'Power Storage',  # not an actual generator
+            }
+            or 'Future content' in name
+        ):
+            return ()
+
+        attrs = next(cls.get_attrs(page, 'InfoBox'))
+        if not any(
+            tier in attrs['researchTier'] for tier in tiers
+        ):
+            return
+
+        # todo - Geothermal Generator
+
+        fuels = dict(cls.parse_by_gen[name](page))
+        power = float(attrs['powerGenerated'])
+        rates = {
+            'Power': Rate(
+                resource='Power',
+                quantity=power,
+                time=1,
+                exp=0.77,
+            ),
+        }
+
+        for fuel, energy in fuels.items():
+            recipe = cls(
+                name=f'{name} powered by {fuel}',
+                crafted_in=name,
                 tier=attrs['researchTier'],
-                time=float(attrs['craftingTime']),
+                time=1,
                 rates={
-                    attrs['product']: rate,
-                },
+                    fuel: Rate(
+                        resource=fuel,
+                        quantity=-1,
+                        time=energy/power,
+                        exp=0.77,
+                    ),
+                    **rates,
+                }
             )
 
-    def secs_per_extra(self, rates: Dict[str, GK_Intermediate]) -> str:
-        rate, = rates[self.first_output]
-        if rate < 1e-6:
-            return '∞'
-        return f'{1 / rate:.1f}'
-
-    @property
-    def building_name(self) -> str:
-        if 'Miner' in self.crafted_in:
-            return self.name.split('from ')[1]
-        return self.crafted_in
+            yield recipe
 
 
 def fill_ores(
     session: Session, recipes: Collection[Recipe],
-) -> Iterable[Recipe]:
+) -> Iterable[OreRecipe]:
     known_products = set()
     all_inputs = set()
     for recipe in recipes:
-        for product, quantity in recipe.rates.items():
-            if quantity > 0:
+        for product, rate in recipe.rates.items():
+            if rate.is_output:
                 known_products.add(product)
-            elif quantity < 0:
+            elif rate.is_input:
                 all_inputs.add(product)
 
     missing_input_names = all_inputs - known_products
     inputs = get_api(session, titles='|'.join(missing_input_names))
 
     for title, missing_input in inputs:
-        yield from Recipe.from_ore_page(missing_input)
+        yield from OreRecipe.from_page(missing_input)
 
 
-def fetch_recipes(session: Session, names: List[str]) -> Iterable[Tuple[str, str]]:
-    for start in range(0, len(names), MAX_RECIPES):
-        name_segment = names[start: start+MAX_RECIPES]
-        yield from get_api(
-            session,
-            titles='|'.join(name_segment),
-            # rvsection=2,  # does not work for Biomass
-        )
-
-
-def parse_box_attrs(content: str) -> Iterable[Tuple[str, str]]:
-    for match in re.finditer(
-        r'^'
-        r'\s*\|'
-        r'\s*(\w+?)'
-        r'\s*='
-        r'\s*([^=|]+?)'
-        r'\s*$',
-        content,
-        re.M,
-    ):
-        yield match.groups()
-
-
-def parse_infoboxes(page: str) -> Iterable[Dict[str, str]]:
-    for box_match in re.finditer(
-        r'^{{Infobox.*$', page, re.M,
-    ):
-        box_content = page[
-            box_match.end() + 1:
-            page.index('}}\n', box_match.end() + 1)
-        ]
-        yield dict(parse_box_attrs(box_content))
-
-
-def fetch_power_info(
+def fill_generators(
     session: Session,
-    building_names: Collection[str],
-) -> Iterable[Tuple[str, Dict[str, str]]]:
-    non_miners = dict(
-        get_api(
-            session,
-            titles='|'.join(
-                b for b in building_names if 'Miner' not in b
-            ),
-        )
-    )
-    for name, page in non_miners.items():
-        info, = parse_infoboxes(page)
-        yield name, info
-
-    if any('Miner' in b for b in building_names):
-        (_, miner_page), = get_api(session, titles='Miner')
-        for info in parse_infoboxes(miner_page):
-            yield info['name'], info
-
-
-def fetch_powers(
-    session: Session,
-    building_names: Collection[str],
     tiers: Set[str],
-) -> Iterable[Tuple[str, float]]:
-    for name, info in fetch_power_info(session, building_names):
-        if any(
-            tier in info['researchTier']
-            for tier in tiers
-        ):
-            yield name, 1e6 * float(info['powerUsage'])
+) -> Iterable[GeneratorRecipe]:
+    for name, page in get_api(
+        session,
+        generator='categorymembers',
+        gcmtitle='Category:Generators',
+        gcmtype='page',
+        gcmlimit=250,
+    ):
+        yield from GeneratorRecipe.from_page(name, page, tiers)
 
 
 def get_recipes(tiers: Set[str]) -> Dict[str, Recipe]:
@@ -327,7 +394,7 @@ def get_recipes(tiers: Set[str]) -> Dict[str, Recipe]:
         component_pages = fetch_recipes(session, component_names)
 
         recipes = list(chain.from_iterable(
-            Recipe.from_component_page(page)
+            ProductionRecipe.from_page(page)
             for title, page in component_pages
         ))
         recipes.extend(fill_ores(session, recipes))
@@ -337,19 +404,37 @@ def get_recipes(tiers: Set[str]) -> Dict[str, Recipe]:
             {recipe.crafted_in for recipe in recipes},
             tiers,
         ))
+        generators = tuple(fill_generators(session, tiers))
 
-    above_tier = set()
-    for recipe in recipes:
+    above_tier = []
+    for i, recipe in enumerate(recipes):
         power = powers.get(recipe.crafted_in)
         if power is None:
-            above_tier.add(recipe.name)
+            above_tier.append(i)
         else:
-            recipe.base_power = power
+            recipe.rates['Power'] = Rate(
+                resource='Power', quantity=-power, time=1, exp=1.6,
+            )
 
-    return {
-        r.name: r for r in recipes
-        if r.name not in above_tier
+    for i in reversed(above_tier):
+        del recipes[i]
+
+    all_outputs = {
+        rate.resource
+        for recipe in recipes
+        for rate in recipe.rates.values()
+        if rate.is_output
     }
+
+    recipes.extend(
+        g for g in generators
+        if all(
+            rate == 'Power' or rate in all_outputs
+            for rate in g.rates.keys()
+        )
+    )
+
+    return {r.name: r for r in recipes}
 
 
 def load_recipes(tiers: Set[str]) -> Dict[str, Recipe]:
@@ -392,11 +477,137 @@ def graph_recipes(
 
     for recipe in recipes.values():
         for source, rate in recipe.rates.items():
-            if rate < 0:  # inputs only
+            if rate.is_input:
                 dot.edge(
                     tail_name=labels_to_i[source],
                     head_name=labels_to_i[recipe.first_output],
-                    label=f'{-1/rate:.2f} s/1',
+                    label=f'{-1/rate.rate:.2f} s/1',
                 )
 
     dot.render(view=view)
+
+
+def prune_recipes(
+    recipes: Dict[str, 'Recipe'], initial_recipes: Dict[str, float],
+) -> Tuple[
+    Dict[str, 'Recipe'],  # pruned recipes
+    Dict[str, float],  # initial clocks
+]:
+    recipes_by_resource = defaultdict(list)
+    for recipe_name, recipe in recipes.items():
+        for resource, rate in recipe.rates.items():
+            if rate.is_output:
+                recipes_by_resource[resource].append((recipe, rate))
+
+    rates = defaultdict(float)
+    clocks = defaultdict(int)
+    new_clocks = initial_recipes
+    rate_history = set()
+
+    while new_clocks:
+        for recipe_name, clock in new_clocks.items():
+            clocks[recipe_name] += clock
+            for resource, rate in recipes[recipe_name].rates.items():
+                new_rate = rates[resource] + rate.scaled_rate(clock)
+                if abs(new_rate) > 1e-10:
+                    rates[resource] = new_rate
+                else:
+                    del rates[resource]
+
+        missing_rates = {
+            resource: rate
+            for resource, rate in rates.items()
+            if rate < -1e-10
+        }
+
+        # This helps combat graph cycles involving power
+        if 'Power' in missing_rates and len(missing_rates) > 1:
+            del missing_rates['Power']
+
+        # Cut short any cycles and be satisfied with a terrible approximation
+        new_rates = tuple(sorted(missing_rates.keys()))
+        if new_rates in rate_history:
+            break
+        rate_history.add(new_rates)
+
+        new_clocks = defaultdict(float)
+
+        for missing_resource, missing_rate in missing_rates.items():
+            # Recipes that could fill the gap
+            # Avoid already-present recipes as an approximation that has no cycles
+            outputs = [
+                (recipe, out_rate)
+                for recipe, out_rate in recipes_by_resource[missing_resource]
+            ]
+
+            n_outputs = len(outputs)
+            if not n_outputs:
+                continue
+            rate_per = -missing_rate / n_outputs
+
+            # Each output needs to contribute equally to the solution
+            # e.g. for output rates of 0.5, 1, 2 /s,
+            # and a needed total rate of 32.455 /s,
+            # each needs to contribute 10.818 /s
+            for recipe, rate in outputs:
+                inverse_clock = rate.clock_for_rate(rate_per)
+                if inverse_clock >= 0.5:
+                    new_clocks[recipe.name] += inverse_clock
+
+    return {
+        name: recipes[name] for name in clocks.keys()
+    }, clocks
+
+
+def prune_recipes_old(
+    recipes: Dict[str, 'Recipe'], initial_recipes: Dict[str, float],
+) -> Tuple[
+    Dict[str, 'Recipe'],  # pruned recipes
+    Dict[str, float],  # initial clocks
+]:
+    recipes_by_resource = defaultdict(list)
+    for recipe_name, recipe in recipes.items():
+        for resource, rate in recipe.rates.items():
+            recipes_by_resource[resource].append((recipe, rate))
+
+    initial_rates = defaultdict(float)
+    initial_clocks = defaultdict(int)
+
+    def recurse_initial(recipe_name, clock: float):
+        initial_clocks[recipe_name] += clock
+
+        for resource, rate in recipes[recipe_name].rates.items():
+            initial_rates[resource] += rate.scaled_rate(clock)
+
+            if rate.is_input and initial_rates[resource] < 0:
+                outputs = [
+                    (recipe, rate)
+                    for recipe, rate in recipes_by_resource[resource]
+                    if rate.is_output
+                ]
+                n_outputs = len(outputs)
+                rate_per = -initial_rates[resource] / n_outputs
+
+                # Each output needs to contribute equally to the solution
+                # e.g. for output rates of 0.5, 1, 2 /s,
+                # and a needed total rate of 32.455 /s,
+                # each needs to contribute 10.818 /s
+
+                for recipe, rate in outputs:
+                    inverse_clock = rate.clock_for_rate(rate_per)
+                    if inverse_clock >= 0.5:
+                        recurse_initial(
+                            recipe.name,
+                            math.ceil(inverse_clock),
+                        )
+
+    for recipe, clock in initial_recipes.items():
+        recurse_initial(recipe, clock)
+
+    pruned_recipes = {
+        recipe: recipes[recipe]
+        for recipe, clock in initial_clocks.items()
+        if clock > 1e-3
+    }
+    logger.info(f'Kept {len(pruned_recipes)}/{len(recipes)} recipes')
+    return pruned_recipes, initial_clocks
