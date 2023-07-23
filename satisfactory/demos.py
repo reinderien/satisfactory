@@ -14,7 +14,7 @@ TIERS_TO_5 = {
     'Tier 2',
     'Tier 3',
     'Tier 4',
-    'M.A.M.',
+    'MAM',
 }
 
 
@@ -152,14 +152,13 @@ def big_tier_4():
 def current():
     print('Current gameplay based on fixed mine recipes')
 
-    def constraints(power) -> Tuple[GK_Operators, ...]:
+    def constraints(power: PowerSolver) -> Tuple[GK_Operators, ...]:
         return (
             power.building_total <= 100,
             power.power_total <= 300e6,
             # power.shard_total <= 94,
             power.buildings['Iron Ore from Miner Mk.2 on Pure node'] == 3,
             power.buildings['Copper Ore from Miner Mk.2 on Pure node'] == 1,
-            power.buildings['Caterium Ore from Miner Mk.2 on Pure node'] == 1,
         )
 
     recipes = load_recipes(TIERS_TO_5)

@@ -228,6 +228,16 @@ class Recipe:
             return self.name.split('from ')[1]
         return self.crafted_in
 
+    @property
+    def tier_name(self) -> str:
+        match = re.search(
+            r'\[\[(.+?)\]\]',
+            self.tier,
+        )
+        if match:
+            return match.group(1)
+        return self.tier
+
 
 def fill_ores(
     session: Session, recipes: Collection[Recipe],
@@ -356,12 +366,14 @@ def load_recipes(tiers: Set[str]) -> Dict[str, Recipe]:
     fn = Path('.recipes')
     if fn.exists():
         with fn.open('rb') as f:
-            return pickle.load(f)
+            cached_tiers, recipes = pickle.load(f)
+        if cached_tiers >= tiers:
+            return recipes
 
     logger.info('Fetching recipe data from MediaWiki...')
     recipes = get_recipes(tiers)
     with fn.open('wb') as f:
-        pickle.dump(recipes, f)
+        pickle.dump((tiers, recipes), f)
     logger.info(f'{len(recipes)} recipes loaded.')
     return recipes
 
